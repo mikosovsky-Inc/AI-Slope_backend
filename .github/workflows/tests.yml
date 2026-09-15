@@ -1,0 +1,51 @@
+name: Backend tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Tests (Python 3.12, PostgreSQL 17)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: ai_slop_test
+          POSTGRES_PASSWORD: ci_only_password
+          POSTGRES_DB: ai_slop_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ai_slop_test -d ai_slop_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Credentials are only for the temporary CI database.
+      TEST_DATABASE_URL: postgresql+psycopg://ai_slop_test:ci_only_password@localhost:5432/ai_slop_test
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install dependencies from lockfile
+        run: uv sync --locked --dev
+
+      - name: Run unit and PostgreSQL integration tests
+        run: uv run --no-sync pytest -ra
