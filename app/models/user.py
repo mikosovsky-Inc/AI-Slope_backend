@@ -1,10 +1,11 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, UniqueConstraint, func, text
+from sqlalchemy import DateTime, Enum, UniqueConstraint, func, text
 from sqlmodel import Field
 
 from app.db.base import Base
+from app.models.roles import UserRole
 
 
 class User(Base, table=True):
@@ -14,6 +15,19 @@ class User(Base, table=True):
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     email: str = Field(max_length=254, nullable=False)
     password_hash: str = Field(max_length=255, nullable=False, repr=False, exclude=True)
+    role: UserRole = Field(
+        default=UserRole.USER,
+        sa_type=Enum(
+            UserRole,
+            values_callable=lambda roles: [role.value for role in roles],
+            native_enum=False,
+            create_constraint=True,
+            name="user_role",
+            length=5,
+        ),
+        nullable=False,
+        sa_column_kwargs={"server_default": "user"},
+    )
     is_active: bool = Field(
         default=True, nullable=False, sa_column_kwargs={"server_default": text("true")}
     )

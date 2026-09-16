@@ -17,3 +17,7 @@ class AccessTokenClaims(BaseModel):
     iss: str
     aud: str
     token_type: Literal["access"]
+
+
+class SetupStatus(BaseModel):
+    registration_required: bool

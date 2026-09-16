@@ -3,6 +3,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator
 
+from app.models.roles import UserRole
+
 
 class Credentials(BaseModel):
     model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
@@ -25,5 +27,6 @@ class UserRead(BaseModel):
 
     id: UUID
     email: EmailStr
+    role: UserRole
     is_active: bool
     created_at: datetime

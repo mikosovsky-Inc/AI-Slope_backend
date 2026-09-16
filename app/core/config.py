@@ -13,6 +13,7 @@ class Settings(BaseSettings):
         hide_input_in_errors=True,
     )
 
+    cors_allowed_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
     database_url: PostgresDsn
     jwt_secret_key: SecretStr
     jwt_access_token_minutes: int = Field(default=30, ge=1, le=1440)

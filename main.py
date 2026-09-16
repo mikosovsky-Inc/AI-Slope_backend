@@ -2,7 +2,9 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.types import ASGIApp
 
 from app.api.router import router
 from app.core.config import get_settings
@@ -18,6 +20,19 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AI-Slop API", version="0.1.0", lifespan=lifespan)
 app.include_router(router)
+
+
+class APICORSMiddleware(CORSMiddleware):
+    def __init__(self, app: ASGIApp):
+        super().__init__(
+            app,
+            allow_origins=get_settings().cors_allowed_origins,
+            allow_methods=["GET", "POST"],
+            allow_headers=["Authorization", "Content-Type"],
+        )
+
+
+app.add_middleware(APICORSMiddleware)
 
 
 @app.exception_handler(RequestValidationError)

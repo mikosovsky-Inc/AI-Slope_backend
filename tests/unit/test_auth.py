@@ -25,6 +25,7 @@ def test_register_login_me(client, db):
     response = register(client)
     assert response.status_code == 201
     assert response.json()["email"] == "creator@example.com"
+    assert response.json()["role"] == "admin"
     assert "password" not in response.text
     user = db.exec(select(User)).one()
     assert user.password_hash.startswith("$argon2id$")
@@ -158,3 +159,27 @@ def test_token_roundtrip(settings):
     user_id = uuid4()
     token = create_access_token(user_id, settings)
     assert decode_access_token(token.access_token, settings).sub == user_id
+
+
+def test_later_users_get_user_role_even_when_admin_is_inactive(client, db):
+    first = register(client)
+    assert first.json()["role"] == "admin"
+    admin = db.exec(select(User)).one()
+    admin.is_active = False
+    db.commit()
+    for email in ["second@example.com", "third@example.com"]:
+        response = client.post("/api/v1/auth/register", json=CREDENTIALS | {"email": email})
+        assert response.status_code == 201
+        assert response.json()["role"] == "user"
+        token = login(client, email=email).json()["access_token"]
+        me = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert me.json()["role"] == "user"
+
+
+def test_cannot_request_admin_role_after_registration(client):
+    register(client)
+    response = client.post(
+        "/api/v1/auth/register",
+        json=CREDENTIALS | {"email": "second@example.com", "role": "admin"},
+    )
+    assert response.status_code == 422

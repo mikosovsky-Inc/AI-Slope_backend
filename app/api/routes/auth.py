@@ -2,9 +2,9 @@ from fastapi import APIRouter, HTTPException, Response, status
 
 from app.api.dependencies import AppSettings, CurrentUser, DbSession, unauthorized
 from app.core.security import create_access_token
-from app.schemas.auth import TokenResponse
+from app.schemas.auth import SetupStatus, TokenResponse
 from app.schemas.user import Credentials, UserCreate, UserRead
-from app.services.auth import EmailAlreadyRegistered, authenticate_user, register_user
+from app.services.auth import EmailAlreadyRegistered, authenticate_user, has_users, register_user
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -33,3 +33,9 @@ def login(
 @router.get("/me", response_model=UserRead)
 def me(user: CurrentUser) -> UserRead:
     return UserRead.model_validate(user)
+
+
+@router.get("/setup", response_model=SetupStatus)
+def setup(db: DbSession, response: Response) -> SetupStatus:
+    response.headers["Cache-Control"] = "no-store"
+    return SetupStatus(registration_required=not has_users(db))

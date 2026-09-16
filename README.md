@@ -75,7 +75,7 @@ logowanie i `/me`, następnie usuwa swój schemat. Konto testowe musi mieć praw
 Konfiguracja `S3_*` jest przygotowana pod bucket SeaweedFS zgodny z S3.
 Przesyłanie plików i uruchamianie SeaweedFS pozostają do kolejnego etapu.
 Nie ma jeszcze odświeżania/unieważniania tokenów, resetowania hasła,
-weryfikacji e-maila, ról ani limitowania prób logowania. Przy publicznym
+weryfikacji e-maila ani limitowania prób logowania. Przy publicznym
 wdrożeniu należy skonfigurować HTTPS i ograniczenie liczby prób logowania.
 
 Nowe modele bazodanowe definiuj jako `SQLModel` z `table=True` (przez wspólną
@@ -94,3 +94,49 @@ cały zestaw testów. `TEST_DATABASE_URL` jest ustawiony w workflow, dzięki
 czemu test integracyjny PostgreSQL również się wykonuje.
 Nie wymaga sekretów repozytorium ani pliku `.env` — używa danych testowych.
 Do repozytorium należy dołączyć `uv.lock`.
+
+
+## Role użytkowników
+
+Pierwsza udana rejestracja w pustej tabeli `users` otrzymuje rolę `admin`.
+Każda kolejna otrzymuje `user`, także gdy administrator jest nieaktywny.
+Rola jest nadawana przez backend; pole `role` w żądaniu rejestracji jest odrzucane.
+Odpowiedzi rejestracji oraz `/api/v1/auth/me` zawierają `role`.
+
+Migracja `0002` nadaje najstarszemu istniejącemu kontu rolę `admin`
+(według `created_at`, a przy remisie UUID), pozostałym `user`.
+Uruchom ją przez `uv run alembic upgrade head`.
+Przy równoległych rejestracjach pierwszy zatwierdzony zapis otrzymuje `admin`;
+[blokada PostgreSQL](https://www.postgresql.org/docs/17/explicit-locking.html)
+serializuje sprawdzenie pustej tabeli i zapis. SQLite służy tylko do testów jednostkowych.
+Role są na razie zapisywane i zwracane przez API; nie dodano endpointów administracyjnych.
+
+## Oddzielny frontend
+
+Backend hostuje wyłącznie API, domyślnie pod http://localhost:8000.
+Frontend jest osobnym projektem i serwerem FastAPI na http://localhost:3000.
+Backend nie wymaga plików ani instalacji projektu frontendowego.
+
+W `.env` backendu ustaw dozwolone adresy frontendu:
+
+```dotenv
+CORS_ALLOWED_ORIGINS=["http://localhost:3000","http://127.0.0.1:3000"]
+```
+
+W `.env` frontendu ustaw `API_BASE_URL=http://localhost:8000`.
+To adres osiągalny z przeglądarki użytkownika. Przy wdrożeniu ustaw rzeczywiste
+adresy obu usług; adresy w CORS nie powinny mieć końcowego ukośnika.
+
+Frontend pobiera `GET /api/v1/auth/setup` i wybiera rejestrację przy pustej bazie
+lub logowanie, gdy istnieje konto. Logowanie, JWT i dane użytkowników obsługuje
+wyłącznie backend. [Konfiguracja CORS](https://fastapi.tiangolo.com/tutorial/cors/).
+
+Opcjonalny test obu aplikacji w Chromium, gdy repozytoria są obok siebie:
+
+```sh
+uv run --with playwright python -m playwright install chromium
+uv run --with playwright python tests/browser_smoke.py
+```
+
+Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
+Nie korzysta z bazy skonfigurowanej w `.env`.
