@@ -1,3 +1,4 @@
+import os
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -137,7 +138,12 @@ def test_inactive_user_cannot_login_or_use_token(client, db):
     )
 
 
-def test_settings_read_dotenv_and_hide_secret(tmp_path):
+def test_settings_read_dotenv_and_hide_secret(tmp_path, monkeypatch):
+    # Process environment takes precedence over dotenv, including in IDE test runners.
+    # Isolate this test; monkeypatch restores all removed values afterwards.
+    for key in list(os.environ):
+        if key.lower() in Settings.model_fields:
+            monkeypatch.delenv(key)
     env = tmp_path / ".env"
     secret = "a-unique-test-secret" * 3
     env.write_text(f"DATABASE_URL=postgresql+psycopg://u:p@localhost/db\nJWT_SECRET_KEY={secret}\n")
