@@ -236,9 +236,8 @@ Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
 
 
-## TODO po etapie 4
+## TODO po etapie 5
 
-- Etap 5: zapis konkurentów i wyników researchu.
 - Etapy 6–10: pomysły, domena video, scenariusze i reżyseria.
 - Etapy 11–16: SeaweedFS, adaptery GPU/TTS, Dramatiq, FFmpeg i kontrola jakości.
 - Etapy 17–20: scheduler, panelowe API, budżety i rozszerzona obserwowalność.
@@ -443,7 +442,49 @@ HTTP/logi nie ujawniają treści promptów, odpowiedzi dostawcy ani sekretów.
 zapytanie (język, słowa kluczowe, limit) i zwalidowany wynik. Lokalna implementacja
 filtruje jawnie przekazane rekordy, domyślnie zwraca pustą listę. Nie wykonuje sieci
 ani nie wymyśla prawdziwych konkurentów. Przyszły adapter wyszukiwarki implementuje
-`research(query)`; zapisywanie wyników i endpointy konkurencji należą do etapu 5.
+`research(query)`; zapisywanie wyników i endpointy konkurencji opisano w etapie 5.
 
 Analiza na tym etapie jest synchronicznym endpointem `def` w threadpool FastAPI.
 Kolejki i trwałe joby pozostają na etap 14, rejestr kosztów na etap 19.
+
+## Etap 5 — Competitor Research
+
+Endpointy wymagają JWT właściciela kanału (cudzy kanał zwraca 404):
+
+```sh
+curl --fail-with-body -X POST \
+  "http://localhost:8000/api/v1/channels/$CHANNEL_ID/competitor-research" \
+  -H "Authorization: Bearer $TOKEN"
+curl --fail-with-body \
+  "http://localhost:8000/api/v1/channels/$CHANNEL_ID/competitors?limit=20&offset=0" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+POST nie przyjmuje body. Korzysta z języka kanału i seed keywords blueprintu;
+brak słów kluczowych zwraca 409 (najpierw analiza lub ręczny PATCH blueprintu).
+Zwraca `{"processed": N, "items": [...]}`. GET zwraca `items`, `total`, `limit`,
+`offset`; limit 1–100, offset >= 0, kolejność po nazwie i ID.
+
+`Competitor` przechowuje nazwę, platformę, URL, język, niszę, obserwowane formaty,
+typową długość, częstotliwość publikacji, notatki i czas aktualizacji.
+`CompetitorContent` przechowuje przykładowe tytuły i ich kolejność. To materiały
+benchmarkowe; nie pobieramy ani nie kopiujemy scenariuszy, filmów lub transkrypcji.
+
+Migracja `0004` dodaje tabele SQLModel, indeksy, unikalność URL w obrębie kanału
+oraz kaskady usuwania. Compose stosuje migrację przy starcie API; lokalnie:
+`uv run --no-active alembic upgrade head`.
+
+Powtórny research aktualizuje wpisy według dokładnego, znormalizowanego przez
+Pydantic URL (nie rozpoznaje aliasów adresów tej samej platformy). Zastępuje ich
+listę przykładowych tytułów, usuwając identyczne powtórzenia. Zachowuje ID konkurenta.
+Nie usuwa konkurentów nieobecnych w nowym wyniku; pusty wynik zachowuje historię.
+Cała paczka jest walidowana i zapisywana atomowo. Konflikt zmiany kanału podczas
+researchu zwraca 409, błędne wyniki 502, niedostępny provider/baza 503.
+
+Domyślnie `get_competitor_research_provider` zwraca pusty lokalny provider zarówno
+w mock, jak i live. **Wyszukiwarka nie jest jeszcze podłączona.** Można wstrzyknąć
+`LocalCompetitorResearchProvider(records)` z rekordami `CompetitorResearchResult`
+albo własny adapter implementujący `research(query)`. Testy pokazują wstrzyknięcie
+przez `app.dependency_overrides[get_competitor_research_provider]`. Przyszły adapter
+powinien mapować błędy połączenia na `ResearchUnavailable`, mieć timeout i ograniczone
+ponowienia. Nie używamy LLM do wymyślania konkurentów ani nie wykonujemy płatnych calli.

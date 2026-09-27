@@ -7,6 +7,12 @@ from redis.exceptions import RedisError
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.modules.channels.service import ChannelNotFound
+from app.modules.competitors.service import (
+    ResearchConflict,
+    ResearchInvalidOutput,
+    ResearchNotReady,
+    ResearchUnavailable,
+)
 from app.modules.intelligence.service import AnalysisConflict
 from app.shared.llm import LLMError, LLMRefusal, LLMUnavailable
 
@@ -54,7 +60,22 @@ async def llm_error(request: Request, exc: LLMError) -> JSONResponse:
     )
 
 
+async def research_error(request: Request, exc: Exception) -> JSONResponse:
+    errors = {
+        ResearchNotReady: (409, "Analyze the channel or set seed keywords first"),
+        ResearchConflict: (409, "Channel changed during research; retry"),
+        ResearchInvalidOutput: (502, "Invalid competitor research result"),
+        ResearchUnavailable: (503, "Competitor research unavailable"),
+    }
+    status, message = errors[type(exc)]
+    return JSONResponse(
+        status_code=status, content={"detail": message}, headers={"Cache-Control": "no-store"}
+    )
+
+
 def register_error_handlers(app: FastAPI) -> None:
+    for error in (ResearchNotReady, ResearchConflict, ResearchInvalidOutput, ResearchUnavailable):
+        app.add_exception_handler(error, research_error)
     app.add_exception_handler(AnalysisConflict, analysis_conflict)
     app.add_exception_handler(LLMError, llm_error)
     app.add_exception_handler(ChannelNotFound, channel_not_found)

@@ -216,3 +216,29 @@ Osobny stack Docker osiągnął healthy. Test HTTP: docs, readiness, rejestracja
 logowanie, utworzenie kanału, ochrona analizy przez JWT, analiza i trwały odczyt.
 Testy korzystały wyłącznie z mocka; nie wykonano płatnych wywołań OpenAI.
 Następny etap: Competitor Research (5).
+
+## Etap 5 — zapis benchmarków konkurencji
+
+Moduł competitors używa istniejącego CompetitorResearchProvider. Encje SQLModel
+Competitor i CompetitorContent są objęte migracją 0004. URL identyfikuje konkurenta
+w obrębie kanału; wpisy różnych właścicieli nie są współdzielone. Przykładowe tytuły
+są oddzielnymi rekordami, bez kopiowania pełnych treści. FK CASCADE usuwa benchmarki
+wraz z kanałem i tytuły wraz z konkurentem.
+
+POST competitor-research zwalnia transakcję przed providerem. Po walidacji całej
+paczki blokuje kanał, sprawdza wersję updated_at i wykonuje atomowy upsert wraz
+z zastąpieniem tytułów. Równoległe zmiany powodują 409 zamiast cichego nadpisania.
+Pusty wynik nie kasuje historii. GET jest stronicowany i sprawdza ownership.
+
+Obecny lokalny provider domyślnie nie ma rekordów. To świadome ograniczenie:
+brak skonfigurowanej wyszukiwarki nie jest zastępowany fikcyjnymi konkurentami.
+Integrację można wstrzyknąć przez zależność; logika domenowa nie pobiera URL.
+
+### Weryfikacja etapu 5 — 2026-09-27
+
+117 testów przeszło bez pominięć z PostgreSQL i Redis. Weryfikacja obejmuje
+migrację i zgodność metadanych, upsert bez duplikatów, pusty wynik, pagination,
+auth/ownership, walidację wyników, konflikt edycji, rollback błędu zapisu tytułu
+i kaskadowe usuwanie. Ruff oraz formatowanie poprawne. Test HTTP osobnego stosu
+Docker przeszedł: readiness/docs, auth, kanał, analiza, research i lista.
+Brak płatnych calli i wyszukiwania w sieci. Następny etap: Idea Engine (6).

@@ -8,6 +8,9 @@ from app.integrations.llm.factory import CurrentLLM
 from app.modules.channels import service
 from app.modules.channels.models import ChannelStatus
 from app.modules.channels.schemas import ChannelCreate, ChannelDetail, ChannelPage, ChannelUpdate
+from app.modules.competitors.dependencies import CurrentResearch
+from app.modules.competitors.schemas import CompetitorPage, ResearchSummary
+from app.modules.competitors.service import list_competitors, research_competitors
 from app.modules.intelligence.service import analyze_channel
 
 router = APIRouter(prefix="/channels", tags=["channels"])
@@ -59,3 +62,21 @@ def pause(channel_id: UUID, user: CurrentUser, db: DbSession) -> ChannelDetail:
 @router.post("/{channel_id}/analyze", response_model=ChannelDetail)
 def analyze(channel_id: UUID, user: CurrentUser, db: DbSession, llm: CurrentLLM) -> ChannelDetail:
     return analyze_channel(db, user.id, channel_id, llm)
+
+
+@router.post("/{channel_id}/competitor-research", response_model=ResearchSummary)
+def research(
+    channel_id: UUID, user: CurrentUser, db: DbSession, provider: CurrentResearch
+) -> ResearchSummary:
+    return research_competitors(db, user.id, channel_id, provider)
+
+
+@router.get("/{channel_id}/competitors", response_model=CompetitorPage)
+def competitors(
+    channel_id: UUID,
+    user: CurrentUser,
+    db: DbSession,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> CompetitorPage:
+    return list_competitors(db, user.id, channel_id, limit, offset)

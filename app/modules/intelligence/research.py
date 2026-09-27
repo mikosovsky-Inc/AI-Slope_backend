@@ -1,8 +1,8 @@
 """Search boundary for stage 5; local records are supplied explicitly, never scraped."""
 
-from typing import Literal, Protocol
+from typing import Annotated, Literal, Protocol
 
-from pydantic import AnyHttpUrl, Field
+from pydantic import AnyHttpUrl, ConfigDict, Field
 
 from app.modules.channels.schemas import InputModel, Language
 
@@ -14,12 +14,15 @@ class CompetitorResearchQuery(InputModel):
 
 
 class CompetitorResearchResult(InputModel):
+    model_config = ConfigDict(revalidate_instances="always")
     name: str = Field(min_length=1, max_length=120)
     platform: Literal["youtube", "tiktok", "instagram"]
-    url: AnyHttpUrl
+    url: Annotated[AnyHttpUrl, Field(max_length=2000)]
     language: Language
     niche: str = Field(min_length=1, max_length=2000)
-    example_titles: list[str] = Field(default_factory=list, max_length=20)
+    example_titles: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(
+        default_factory=list, max_length=20
+    )
     observed_formats: list[Literal["top5", "story"]] = Field(default_factory=list)
     typical_length_seconds: int | None = Field(default=None, gt=0)
     publishing_frequency: str = Field(default="", max_length=500)
