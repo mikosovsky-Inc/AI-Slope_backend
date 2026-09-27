@@ -4,28 +4,116 @@ FastAPI + PostgreSQL, schematy API Pydantic, konfiguracja `pydantic-settings`,
 hasła Argon2id i tokeny dostępu JWT (HS256). Modele bazy i sesje korzystają z SQLModel (opartego na SQLAlchemy i Pydantic),
 a migracje z Alembic. E-maile są zapisywane małymi literami i unikalne.
 
-## Uruchomienie lokalne
+## Etap 1 — Foundation
 
-Wymagania: Python 3.12+, uv oraz działający Docker Compose.
+Działający fundament modularnego monolitu: FastAPI, PostgreSQL, SQLModel,
+Alembic, Redis, kontenery, health checks, logi JSON i obsługa błędów.
+Istniejące rejestracja, logowanie JWT i role pozostają dostępne.
+Kolejne etapy (kanały, AI, generowanie filmów) nie są jeszcze wdrożone.
+Szczegóły: [docs/architecture.md](docs/architecture.md).
+
+## Uruchomienie całego stacka
+
+Wymagania: Docker i Docker Compose. W katalogu backendu:
 
 ```sh
-uv sync
 cp .env.example .env
 python3 -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
 
-Wpisz wygenerowaną wartość do `JWT_SECRET_KEY` w `.env`. Hasło bazy w
-`DATABASE_URL` musi odpowiadać `POSTGRES_PASSWORD` (znaki specjalne w URL
-należy zakodować). Przykładowe hasło Postgresa służy do pracy lokalnej.
+Jeśli `.env` już istnieje, uzupełnij go zamiast nadpisywać. Wstaw wygenerowany
+klucz do `JWT_SECRET_KEY`. Domyślne dane PostgreSQL w przykładzie służą do pracy
+lokalnej. Następnie:
 
 ```sh
-docker compose up -d --wait postgres
-uv run alembic upgrade head
-uv run uvicorn main:app --reload
+docker compose up --build
 ```
 
-Swagger UI: http://localhost:8000/docs. Migracje uruchamia się jawnie;
-API nie tworzy tabel automatycznie. `.env` jest ignorowany przez Git.
+Compose uruchamia dokładnie trzy usługi: `api`, `postgres`, `redis`.
+API czeka na gotowość obu zależności, wykonuje `alembic upgrade head`,
+następnie startuje Uvicorn. Błąd migracji zatrzymuje start API.
+Dane PostgreSQL i Redis są przechowywane w nazwanych wolumenach.
+Obraz API uruchamia się jako użytkownik bez uprawnień roota i nie zawiera `.env`.
+
+Uruchomienie w tle i weryfikacja:
+
+```sh
+docker compose up --build -d --wait
+curl --fail http://localhost:8000/health
+curl --fail http://localhost:8000/ready
+docker compose logs -f api
+```
+
+Oba endpointy zwracają przy sukcesie `{"status":"ok"}`.
+`/health` sprawdza działanie procesu; `/ready` wykonuje `SELECT 1` w PostgreSQL
+oraz `PING` w Redis i zwraca 503, gdy zależność jest niedostępna.
+Po przywróceniu zależności `/ready` odzyskuje gotowość bez restartu API.
+Swagger UI: http://localhost:8000/docs.
+
+```sh
+docker compose down
+```
+
+Powyższe zatrzymuje stack i zachowuje dane. `docker compose down --volumes`
+usuwa też wszystkie dane obu usług — używaj tylko do świadomego resetu środowiska.
+
+## Uruchomienie API poza Dockerem
+
+Wymagania dodatkowe: Python 3.12+ i uv.
+
+```sh
+uv sync --no-active
+docker compose up -d --wait postgres redis
+uv run --no-active alembic upgrade head
+uv run --no-active uvicorn main:app --reload --port 8000
+```
+
+W tym trybie `DATABASE_URL` i `REDIS_URL` wskazują `localhost`.
+Nie uruchamiaj jednocześnie lokalnego API i kontenera API na tym samym porcie.
+
+## Konfiguracja
+
+`pydantic-settings` czyta `.env` i zmienne procesu (zmienne procesu mają priorytet).
+Przykłady: [.env.example](.env.example). `.env` jest ignorowany przez Git.
+
+| Zmienna | Znaczenie |
+| --- | --- |
+| `DATABASE_URL` | DSN PostgreSQL dla lokalnego API i Alembic, schemat `postgresql+psycopg` |
+| `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB` | Dane inicjalizacji PostgreSQL w Compose |
+| `DOCKER_DATABASE_URL` | Opcjonalny pełny DSN kontenera API; domyślnie budowany z `POSTGRES_*`, host `postgres` |
+| `REDIS_URL` | Adres Redis lokalnie; Compose używa `redis://redis:6379/0` |
+| `DATABASE_CONNECT_TIMEOUT_SECONDS` | Limit połączenia PostgreSQL, domyślnie 3 s |
+| `DATABASE_STATEMENT_TIMEOUT_MS` | Limit zapytania PostgreSQL, domyślnie 5000 ms |
+| `REDIS_TIMEOUT_SECONDS` | Limit połączenia i operacji Redis, domyślnie 2 s |
+| `JWT_SECRET_KEY` | Wymagany klucz podpisu JWT, minimum 32 bajty |
+| `JWT_ACCESS_TOKEN_MINUTES` | Czas ważności JWT, domyślnie 30 minut |
+| `JWT_ISSUER`, `JWT_AUDIENCE` | Wystawca i odbiorca tokenów |
+| `CORS_ALLOWED_ORIGINS` | Tablica JSON dozwolonych adresów frontendu |
+| `LOG_LEVEL` | Poziom logów aplikacji, domyślnie `INFO` |
+| `EXTERNAL_PROVIDERS_MODE` | `mock` (domyślnie) lub `live`; rezerwacja pod integracje późniejszych etapów |
+| `API_PORT`, `POSTGRES_PORT`, `REDIS_PORT` | Porty hosta Compose: 8000, 5432, 6379 |
+| `S3_*` | Rezerwacja konfiguracji SeaweedFS pod późniejszy etap storage |
+
+Hasła zawierające znaki specjalne URL muszą być zakodowane procentowo w DSN.
+W takim przypadku ustaw jawnie także `DOCKER_DATABASE_URL`. Porty wewnątrz
+Compose zawsze wynoszą 5432 i 6379; `*_PORT` zmieniają wyłącznie porty hosta.
+Zmiana `POSTGRES_PASSWORD` nie zmienia hasła istniejącej bazy w wolumenie.
+
+## Migracje
+
+Kontener API wykonuje migracje przy starcie (lokalny stack z jedną instancją API).
+Ręcznie:
+
+```sh
+docker compose exec api alembic current
+docker compose exec api alembic upgrade head
+# Lokalny Python:
+uv run --no-active alembic revision --autogenerate -m "describe change"
+uv run --no-active alembic upgrade head
+```
+
+Przy przyszłym wdrożeniu wielu instancji migracje powinny być osobnym krokiem
+wdrożenia, przed uruchomieniem API. Nie stosujemy `create_all()` w aplikacji.
 
 ## API
 
@@ -54,21 +142,26 @@ odbiorcę, typ tokena i aktywność użytkownika w bazie.
 ## Testy
 
 ```sh
-uv run pytest
-uv run ruff check .
-uv run ruff format --check .
+uv run --no-active pytest
+uv run --no-active ruff check .
+uv run --no-active ruff format --check .
 ```
 
-Testy API korzystają z izolowanej bazy SQLite w pamięci. Test integracyjny
-PostgreSQL jest pomijany, dopóki nie ustawisz `TEST_DATABASE_URL`:
+Testy jednostkowe używają SQLite w pamięci; mockujemy klienta zewnętrznego Redis,
+a nie logikę health check. Testy integracyjne wymagają rzeczywistych usług:
 
 ```sh
-TEST_DATABASE_URL=postgresql+psycopg://ai_slop:ai_slop_local@localhost:5432/ai_slop uv run pytest tests/integration
+TEST_DATABASE_URL=postgresql+psycopg://ai_slop:ai_slop_local@localhost:5432/ai_slop \
+TEST_REDIS_URL=redis://localhost:6379/15 \
+uv run --no-active pytest -ra
 ```
 
-Test tworzy losowy schemat, sprawdza migrację, rejestrację, konflikt e-maila,
-logowanie i `/me`, następnie usuwa swój schemat. Konto testowe musi mieć prawo
-`CREATE SCHEMA`; używaj bazy przeznaczonej do testowania.
+Ustaw DSN zgodny z własną bazą testową. Testy migracji tworzą losowe schematy,
+sprawdzają migracje, rejestrację, role, równoległe rejestracje i logowanie,
+następnie usuwają wyłącznie swoje schematy. Użytkownik bazy potrzebuje prawa
+`CREATE SCHEMA`. Test Redis używa losowego klucza z TTL, bez `FLUSHDB`.
+Bez `TEST_DATABASE_URL` i `TEST_REDIS_URL` odpowiednie testy są pomijane.
+GitHub Actions uruchamia je z usługami PostgreSQL i Redis.
 
 ## Zakres tego etapu
 
@@ -88,7 +181,7 @@ Referencje: [SQLModel](https://sqlmodel.tiangolo.com/tutorial/create-db-and-tabl
 ## GitHub Actions
 
 Workflow `.github/workflows/tests.yml` uruchamia testy przy każdym `push`
-i `pull_request`, na Pythonie 3.12 z tymczasowym PostgreSQL 17.
+i `pull_request`, na Pythonie 3.12 z tymczasowym PostgreSQL 17 i Redis 7.4.
 Instaluje zależności przez `uv sync --locked --dev`, a następnie uruchamia
 cały zestaw testów. `TEST_DATABASE_URL` jest ustawiony w workflow, dzięki
 czemu test integracyjny PostgreSQL również się wykonuje.
@@ -140,3 +233,15 @@ uv run --with playwright python tests/browser_smoke.py
 
 Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
+
+
+## TODO po etapie 1
+
+- Etap 2: Channel, ChannelBlueprint, ContentPillar i CRUD z kontrolą właściciela.
+- Etapy 3–10: adapter LLM, intelligence, research, pomysły, scenariusze i reżyseria.
+- Etapy 11–16: SeaweedFS, adaptery GPU/TTS, Dramatiq, FFmpeg i kontrola jakości.
+- Etapy 17–20: scheduler, panelowe API, budżety i rozszerzona obserwowalność.
+
+Na tym etapie nie ma workerów ani schedulera do uruchomienia, dostawców AI,
+pełnego video workflow ani polecenia seed/demo. Ustawienie `live` nie wykonuje
+jeszcze żadnych płatnych operacji. Zostaną dodane i przetestowane w swoich etapach.

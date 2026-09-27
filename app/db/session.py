@@ -9,7 +9,15 @@ from app.core.config import get_settings
 
 @lru_cache
 def get_engine() -> Engine:
-    return create_engine(str(get_settings().database_url), pool_pre_ping=True)
+    settings = get_settings()
+    return create_engine(
+        str(settings.database_url),
+        pool_pre_ping=True,
+        connect_args={
+            "connect_timeout": settings.database_connect_timeout_seconds,
+            "options": f"-cstatement_timeout={settings.database_statement_timeout_ms}",
+        },
+    )
 
 
 def get_db() -> Generator[Session, None, None]:

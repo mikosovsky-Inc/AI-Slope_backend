@@ -1,7 +1,8 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field, PostgresDsn, SecretStr, field_validator
+from pydantic import Field, PostgresDsn, RedisDsn, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,6 +16,12 @@ class Settings(BaseSettings):
 
     cors_allowed_origins: list[str] = ["http://localhost:3000", "http://127.0.0.1:3000"]
     database_url: PostgresDsn
+    database_connect_timeout_seconds: int = Field(default=3, ge=1, le=30)
+    database_statement_timeout_ms: int = Field(default=5000, ge=100, le=60000)
+    redis_url: RedisDsn = "redis://localhost:6379/0"
+    redis_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    external_providers_mode: Literal["mock", "live"] = "mock"
     jwt_secret_key: SecretStr
     jwt_access_token_minutes: int = Field(default=30, ge=1, le=1440)
     jwt_issuer: str = "ai-slop-backend"

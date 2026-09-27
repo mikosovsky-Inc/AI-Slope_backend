@@ -1,29 +1,43 @@
+import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
-from fastapi.exceptions import RequestValidationError
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp
 
 from app.api.router import router
+from app.api.routes.health import router as health_router
 from app.core.config import get_settings
+from app.core.errors import register_error_handlers
+from app.core.logging import configure_logging
+from app.core.redis import create_redis_client
 from app.db.session import get_engine
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    get_settings()
-    yield
-    get_engine().dispose()
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    logger = logging.getLogger("app.lifecycle")
+    app.state.redis = create_redis_client(settings)
+    logger.info("API started")
+    try:
+        yield
+    finally:
+        app.state.redis.close()
+        get_engine().dispose()
+        logger.info("API stopped")
 
 
 app = FastAPI(title="AI-Slop API", version="0.1.0", lifespan=lifespan)
 app.include_router(router)
+app.include_router(health_router)
+register_error_handlers(app)
 
 
 class APICORSMiddleware(CORSMiddleware):
-    def __init__(self, app: ASGIApp):
+    def __init__(self, app: ASGIApp) -> None:
         super().__init__(
             app,
             allow_origins=get_settings().cors_allowed_origins,
@@ -33,12 +47,3 @@ class APICORSMiddleware(CORSMiddleware):
 
 
 app.add_middleware(APICORSMiddleware)
-
-
-@app.exception_handler(RequestValidationError)
-async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
-    # FastAPI's default response can echo plaintext passwords from invalid input.
-    errors = [
-        {"loc": error["loc"], "msg": error["msg"], "type": error["type"]} for error in exc.errors()
-    ]
-    return JSONResponse(status_code=422, content={"detail": errors})
