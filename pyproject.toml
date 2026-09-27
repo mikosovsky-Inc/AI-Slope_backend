@@ -17,6 +17,7 @@ dependencies = [
     "pwdlib[argon2]>=0.2,<1",
     "redis>=6,<8",
     "httpx>=0.27,<1",
+    "openai>=2,<3",
 ]
 
 [dependency-groups]

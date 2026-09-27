@@ -40,7 +40,18 @@ class VisualStyle(InputModel):
     video_scene_ratio: float = Field(default=0.25, ge=0, le=1)
 
 
+class PostingStrategy(InputModel):
+    videos_per_day: Frequency
+    rationale: str = Field(min_length=1, max_length=2000)
+
+
 class BlueprintConfiguration(InputModel):
+    niche_description: str = Field(default="", max_length=2000)
+    hook_style: str = Field(default="", max_length=2000)
+    suggested_posting_strategy: PostingStrategy | None = None
+    seed_keywords: list[Annotated[str, Field(min_length=1, max_length=120)]] = Field(
+        default_factory=list, max_length=20
+    )
     target_audience: str = Field(default="", max_length=2000)
     tone: str = Field(default="", max_length=500)
     formats: FormatMix = Field(default_factory=FormatMix)

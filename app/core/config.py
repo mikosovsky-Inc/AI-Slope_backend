@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     redis_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     external_providers_mode: Literal["mock", "live"] = "mock"
+    openai_api_key: SecretStr | None = None
+    openai_model: str = ""
+    openai_timeout_seconds: float = Field(default=30, gt=0, le=120)
+    openai_max_retries: int = Field(default=2, ge=0, le=3)
     jwt_secret_key: SecretStr
     jwt_access_token_minutes: int = Field(default=30, ge=1, le=1440)
     jwt_issuer: str = "ai-slop-backend"

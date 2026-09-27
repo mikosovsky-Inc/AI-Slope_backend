@@ -86,7 +86,7 @@ opisie lokalnego uruchomienia. Storage pojawi się w etapie 11.
 ## Kolejne kroki
 
 Etap 2 ukończony: modele kanału, blueprint i pillars, walidacja, indeksy, CRUD i ownership.
-Następny etap 3: LLMProvider i OpenAIProvider ze structured outputs i trybem mock.
+Etap 3 opisano poniżej.
 Kolejne etapy obejmą cały pipeline TOP5/STORY. W etapie 1 nie ma pipeline video,
 renderera, fake filmów ani automatycznej publikacji.
 
@@ -150,4 +150,69 @@ zgodność migracji z metadanymi modeli i downgrade/upgrade.
 Pełny stack zbudowano i uruchomiono w osobnym projekcie Compose.
 Test HTTP kontenera objął auth, tworzenie/listowanie/odczyt kanału, zmianę blueprintu
 z filarami, aktywację, pauzę i usunięcie. Dane testowe były w osobnych wolumenach.
-Etap 3 nie został rozpoczęty.
+Etap 2 zakończony.
+
+
+## Etap 3 — granica integracji LLM
+
+`app/shared/llm.py` zawiera kontrakt Protocol i modele Pydantic request/result/usage.
+`app/integrations/llm/openai.py` jest jedynym miejscem importu SDK OpenAI.
+Adapter używa Responses API ze schematem Pydantic i strict structured output.
+Factory wybiera mock/live na podstawie pydantic-settings. FastAPI zarządza cyklem
+życia klienta, a zależność `CurrentLLM` udostępnia kontrakt przyszłym endpointom.
+
+Mock jest deterministyczny, waliduje jawnie zarejestrowane fixture i nie otwiera
+połączeń. Schematy konkretnych odpowiedzi domenowych i fixture analizy kanałów
+powstaną w etapie 4 wraz z konsumentem kontraktu. Nie dodano migracji ani endpointów;
+obecne zabezpieczenia JWT/ownership pozostają aktywne.
+
+SDK realizuje ograniczone retries i timeout HTTP. Nie ma ponownego generowania
+po błędnej walidacji. Błędy integracji są tłumaczone na bezpieczne błędy kontraktu.
+Usage pozostaje metadanymi wyniku; trwałe CostEvent i budżetowanie są później.
+Testy transportu sprawdzają parser, schemat strict, brak store, tokeny, odmowę,
+niepełne odpowiedzi, walidację, timeout/recovery i limity retries. Test importów
+pilnuje granicy SDK. Nie wykonano płatnych wywołań OpenAI.
+
+### Weryfikacja etapu 3 — 2026-09-27
+
+92 testy przeszły bez pominięć z PostgreSQL i Redis, w tym 16 nowych testów LLM.
+Ruff i formatowanie poprawne. Obraz API zbudowany, wszystkie trzy serwisy
+osobnego stosu Compose osiągnęły healthy. Wywołania OpenAI testowano wyłącznie
+przez symulowany transport HTTP; live API nie było wywoływane.
+Następny etap: Channel Intelligence Service (etap 4).
+
+
+## Etap 4 — Channel Intelligence
+
+Moduł `intelligence` składa prompt z idea/language i wywołuje kontrakt LLMProvider.
+Pydantic `ChannelAnalysis` wymaga kompletnej odpowiedzi; schematy odpowiedzi AI
+nie mają domyślnych wartości maskujących brakujące pola. Schemat odczytu starych
+blueprintów zachowuje kompatybilność. Rozszerzamy JSON konfiguracji, bez zmian tabel.
+
+Endpoint `POST /api/v1/channels/{id}/analyze` wymaga CurrentUser oraz ownership.
+Warstwa route nie zawiera orkiestracji. Przed wywołaniem providera kończymy odczytową
+transakcję. Po odpowiedzi ponownie pobieramy kanał z FOR UPDATE i porównujemy
+updated_at. Wszystkie istniejące modyfikacje kanału/blueprintu aktualizują ten znacznik.
+Konflikt kończy się 409, usunięty/cudzy kanał 404. Zastąpienie blueprintu i filarów
+jest atomowe; błąd providera lub DB nie niszczy poprzedniego wyniku.
+
+Mock ma jawną funkcję fixture dla ChannelAnalysis (pl/en), oznaczoną jako przykład
+offline. Nie wykonujemy web search. Osobny CompetitorResearchProvider przyjmuje
+seed keywords i zwraca typed records; LocalCompetitorResearchProvider filtruje dane
+przekazane przez wywołującego. Wyszukiwarka i trwały zapis konkurentów to etap 5.
+
+Analiza jest jawną akcją po utworzeniu kanału, by nie wywoływać płatnego modelu
+przy każdym POST /channels. Częstotliwość sugerowana przez AI pozostaje sugestią;
+rzeczywista częstotliwość, budżet i język nadal mają jedno źródło prawdy w Channel.
+Nie uruchamiamy generowania filmów ani schedulera. Brak trwałego joba analizy jest
+świadomym ograniczeniem do etapu 14; błędy są raportowane HTTP i bezpiecznym logiem.
+
+### Weryfikacja etapu 4 — 2026-09-27
+
+109 testów przeszło bez pominięć z PostgreSQL i Redis, w tym 17 nowych testów.
+Testy PostgreSQL potwierdzają atomowy rollback błędu zapisu filaru i konflikt
+równoległych analiz (jedna 200, druga 409). Ruff i formatowanie poprawne.
+Osobny stack Docker osiągnął healthy. Test HTTP: docs, readiness, rejestracja,
+logowanie, utworzenie kanału, ochrona analizy przez JWT, analiza i trwały odczyt.
+Testy korzystały wyłącznie z mocka; nie wykonano płatnych wywołań OpenAI.
+Następny etap: Competitor Research (5).

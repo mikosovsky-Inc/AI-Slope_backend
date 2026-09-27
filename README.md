@@ -236,16 +236,16 @@ Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
 
 
-## TODO po etapie 2
+## TODO po etapie 4
 
-- Etap 3: LLMProvider, OpenAIProvider, structured outputs i mock provider.
-- Etapy 4–10: intelligence, research, pomysły, scenariusze i reżyseria.
+- Etap 5: zapis konkurentów i wyników researchu.
+- Etapy 6–10: pomysły, domena video, scenariusze i reżyseria.
 - Etapy 11–16: SeaweedFS, adaptery GPU/TTS, Dramatiq, FFmpeg i kontrola jakości.
 - Etapy 17–20: scheduler, panelowe API, budżety i rozszerzona obserwowalność.
 
-Na tym etapie nie ma workerów ani schedulera do uruchomienia, dostawców AI,
-pełnego video workflow ani polecenia seed/demo. Ustawienie `live` nie wykonuje
-jeszcze żadnych płatnych operacji. Zostaną dodane i przetestowane w swoich etapach.
+Na tym etapie nie ma workerów ani schedulera do uruchomienia, pełnego video
+workflow ani polecenia seed/demo. Adapter OpenAI jest używany przez jawną analizę kanału. Sam start w trybie
+`live` nie wykonuje płatnych operacji.
 
 
 ## Etap 2 — kanały
@@ -301,7 +301,7 @@ Blueprint jest tworzony atomowo z kanałem: format mix TOP5 0.7/STORY 0.3,
 To edytowalne wartości początkowe, nie wynik analizy AI. Filary początkowo są puste.
 Opis, język, częstotliwość publikacji i budżet mają jedno źródło prawdy w Channel,
 a ustawienia twórcze w ChannelBlueprint.configuration (JSON walidowany Pydantic).
-Analiza i automatyczne generowanie konfiguracji pozostają na etap 4.
+Analiza AI jest dostępna przez endpoint opisany w etapie 4.
 
 Przykład ręcznej konfiguracji przez PATCH:
 
@@ -331,3 +331,119 @@ Maksymalnie 20 filarów, unikalne nazwy bez rozróżniania wielkości liter,
 pozycja wynika z kolejności listy. Format mix musi sumować się do 1.
 Usuwanie kanału jest trwałe. Aktualizacja kanału i blueprintu jest jedną transakcją;
 błąd zapisu filaru wycofuje także zmianę kanału.
+
+
+## Etap 3 — integracja LLM
+
+Kontrakt `app/shared/llm.py` udostępnia `LLMProvider`, `LLMRequest`, generyczny
+`LLMResult[T]` i błędy niezależne od dostawcy. Schemat odpowiedzi jest modelem
+Pydantic przekazywanym do `generate(request, response_model)`. Modele domenowe
+nie importują SDK. Adapter OpenAI korzysta z Responses API, `responses.parse`,
+`text_format` i `store=False`:
+https://developers.openai.com/api/docs/guides/structured-outputs
+
+Provider jest tworzony raz podczas startu FastAPI, dostępny przez `CurrentLLM`
+i zamykany podczas shutdown. Interfejs jest synchroniczny — używaj go w zwykłych
+endpointach `def` lub workerach; w `async def` przenieś wywołanie do threadpool.
+Endpoint analizy z etapu 4 korzysta z tego providera; start API nie wykonuje
+płatnych wywołań.
+
+Domyślnie `EXTERNAL_PROVIDERS_MODE=mock`. Mock działa offline i wymaga jawnych
+fixture dla danego schematu; brak fixture zgłasza błąd zamiast wymyślać odpowiedź.
+Przykład użycia kontraktu (tak samo dla rzeczywistego providera):
+
+```python
+from pydantic import BaseModel, ConfigDict
+from app.shared.llm import LLMRequest
+from app.integrations.llm.mock import MockLLMProvider
+
+
+class Title(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str
+
+
+provider = MockLLMProvider({Title: {"title": "Tajemnice historii"}})
+result = provider.generate(
+    LLMRequest(instructions="Zaproponuj tytuł", prompt="Kanał historyczny"), Title
+)
+assert result.data.title == "Tajemnice historii"
+```
+
+Tryb live wymaga w `.env`: `EXTERNAL_PROVIDERS_MODE=live`, `OPENAI_API_KEY`
+i `OPENAI_MODEL` obsługującego Structured Outputs. Klucz jest `SecretStr`.
+Brak klucza/modelu zatrzymuje start z czytelnym komunikatem. Compose przekazuje
+te ustawienia do API. Wybór modelu i jego ceny pozostają jawne.
+
+`OPENAI_TIMEOUT_SECONDS=30` ustawia timeout operacji HTTP w SDK (nie całego
+workflow). `OPENAI_MAX_RETRIES=2` oznacza maksymalnie 3 próby; dopuszczalne 0–3.
+SDK stosuje exponential backoff z jitterem i respektuje Retry-After; ponawia
+m.in. problemy połączenia, timeout, 408, 409, 429 i 5xx. Nie ma dodatkowej pętli
+ponowień w aplikacji. Nie ponawiamy walidacji, odmowy ani niepełnej odpowiedzi.
+`LLMUnavailable`, `LLMInvalidOutput`, `LLMRefusal` i `LLMIncomplete` przekazują
+bezpieczne komunikaty bez treści promptów, kluczy i odpowiedzi dostawcy.
+
+Wynik zawiera nazwę providera/modelu, response ID i dostępne statystyki tokenów.
+Brak usage jest oznaczony `None`; mock raportuje zero. Nie są to wyliczone koszty
+USD ani trwały rejestr kosztów — to zakres późniejszego etapu Cost Tracking.
+
+Testy SDK korzystają z prawdziwego parsera i `httpx.MockTransport`; nie wymagają
+klucza ani dostępu do OpenAI: `uv run pytest tests/unit/test_llm.py -q`.
+Channel Intelligence Service opisano poniżej.
+
+
+## Etap 4 — Channel Intelligence
+
+Po utworzeniu kanału uruchom analizę jawnie, przekazując JWT właściciela:
+
+```sh
+curl --fail-with-body -X POST \
+  "http://localhost:8000/api/v1/channels/$CHANNEL_ID/analyze" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Endpoint nie przyjmuje body. Zwraca `200` i pełny `ChannelDetail` z zapisanym
+blueprintem. Używa `Channel.idea` oraz `Channel.language`; nie zmienia języka,
+budżetu, częstotliwości publikacji, statusu ani trybu autopilota kanału.
+Utworzenie kanału nadal nie wykonuje płatnego wywołania — analiza jest osobną akcją.
+
+Blueprint zawiera:
+
+- `niche_description`, `target_audience`, `tone`;
+- `formats` (TOP5/STORY, suma wag 1) i 1–20 unikalnych `content_pillars`;
+- `video_style` (długość, tempo, limit hooka) i `hook_style`;
+- `visual_style` (opis i udział scen video);
+- `suggested_posting_strategy` (proponowane `videos_per_day` i uzasadnienie);
+- `seed_keywords` (1–20 fraz do przyszłego researchu).
+
+Nowe pola konfiguracji są przechowywane w istniejącym JSON blueprintu.
+Stare rekordy odczytują się z pustymi wartościami domyślnymi — migracja tabel
+nie jest potrzebna. PATCH blueprintu obsługuje także nowe pola; nadal zastępuje
+całą konfigurację. Propozycja publikacji nie nadpisuje faktycznego harmonogramu.
+
+W `mock` otrzymasz oznaczoną przykładową strategię offline w języku kanału,
+a nie analizę rynku. W `live` serwis korzysta z OpenAI przez `LLMProvider`.
+Schemat odpowiedzi wymaga wszystkich pól i waliduje je przed zapisem.
+Brak realnego web search: strategia jest propozycją modelu, a nie zweryfikowanym
+researchem konkurencji ani prognozą popularności.
+
+Zapis konfiguracji i zastąpienie filarów stanowią jedną transakcję.
+Podczas wywołania LLM nie utrzymujemy blokady ani transakcji DB. Przed zapisem
+ponownie sprawdzamy właściciela i wersję (`updated_at`) z blokadą wiersza.
+Jeśli w międzyczasie zmienił się kanał/blueprint, zwracamy `409`; wynik nie
+nadpisuje zmian. Ponowna świadoma analiza zastępuje blueprint, nie dopisuje filarów.
+Każde wywołanie w trybie live może generować koszt; endpoint nie jest cache'owany.
+
+Błędy: `401` brak uwierzytelnienia, `404` kanał nie istnieje lub jest cudzy,
+`409` równoczesna zmiana, `422` odmowa modelu, `502` błędna/niepełna odpowiedź,
+`503` niedostępny provider lub baza. Nieudana analiza zachowuje poprzedni blueprint.
+HTTP/logi nie ujawniają treści promptów, odpowiedzi dostawcy ani sekretów.
+
+`CompetitorResearchProvider` w `app/modules/intelligence/research.py` definiuje
+zapytanie (język, słowa kluczowe, limit) i zwalidowany wynik. Lokalna implementacja
+filtruje jawnie przekazane rekordy, domyślnie zwraca pustą listę. Nie wykonuje sieci
+ani nie wymyśla prawdziwych konkurentów. Przyszły adapter wyszukiwarki implementuje
+`research(query)`; zapisywanie wyników i endpointy konkurencji należą do etapu 5.
+
+Analiza na tym etapie jest synchronicznym endpointem `def` w threadpool FastAPI.
+Kolejki i trwałe joby pozostają na etap 14, rejestr kosztów na etap 19.

@@ -4,9 +4,11 @@ from uuid import UUID
 from fastapi import APIRouter, Query, Response
 
 from app.api.dependencies import CurrentUser, DbSession
+from app.integrations.llm.factory import CurrentLLM
 from app.modules.channels import service
 from app.modules.channels.models import ChannelStatus
 from app.modules.channels.schemas import ChannelCreate, ChannelDetail, ChannelPage, ChannelUpdate
+from app.modules.intelligence.service import analyze_channel
 
 router = APIRouter(prefix="/channels", tags=["channels"])
 
@@ -52,3 +54,8 @@ def activate(channel_id: UUID, user: CurrentUser, db: DbSession) -> ChannelDetai
 @router.post("/{channel_id}/pause", response_model=ChannelDetail)
 def pause(channel_id: UUID, user: CurrentUser, db: DbSession) -> ChannelDetail:
     return service.change_status(db, user.id, channel_id, ChannelStatus.PAUSED)
+
+
+@router.post("/{channel_id}/analyze", response_model=ChannelDetail)
+def analyze(channel_id: UUID, user: CurrentUser, db: DbSession, llm: CurrentLLM) -> ChannelDetail:
+    return analyze_channel(db, user.id, channel_id, llm)

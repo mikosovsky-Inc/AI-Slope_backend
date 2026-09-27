@@ -13,6 +13,7 @@ from app.core.errors import register_error_handlers
 from app.core.logging import configure_logging
 from app.core.redis import create_redis_client
 from app.db.session import get_engine
+from app.integrations.llm.factory import create_llm_provider
 
 
 @asynccontextmanager
@@ -20,11 +21,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(settings.log_level)
     logger = logging.getLogger("app.lifecycle")
+    app.state.llm = create_llm_provider(settings)
     app.state.redis = create_redis_client(settings)
     logger.info("API started")
     try:
         yield
     finally:
+        app.state.llm.close()
         app.state.redis.close()
         get_engine().dispose()
         logger.info("API stopped")
