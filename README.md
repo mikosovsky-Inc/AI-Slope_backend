@@ -236,9 +236,10 @@ Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
 
 
-## TODO po etapie 5
+## TODO po etapie 6
 
-- Etapy 6–10: pomysły, domena video, scenariusze i reżyseria.
+- Etap 7: domena video, state machine i tworzenie video z zatwierdzonego pomysłu.
+- Etapy 8–10: scenariusze, research faktów i reżyseria.
 - Etapy 11–16: SeaweedFS, adaptery GPU/TTS, Dramatiq, FFmpeg i kontrola jakości.
 - Etapy 17–20: scheduler, panelowe API, budżety i rozszerzona obserwowalność.
 
@@ -488,3 +489,61 @@ albo własny adapter implementujący `research(query)`. Testy pokazują wstrzykn
 przez `app.dependency_overrides[get_competitor_research_provider]`. Przyszły adapter
 powinien mapować błędy połączenia na `ResearchUnavailable`, mieć timeout i ograniczone
 ponowienia. Nie używamy LLM do wymyślania konkurentów ani nie wykonujemy płatnych calli.
+
+## Etap 6 — Idea Engine
+
+Wszystkie endpointy poniżej wymagają JWT właściciela kanału:
+
+```sh
+curl --fail-with-body -X POST \
+  "http://localhost:8000/api/v1/channels/$CHANNEL_ID/ideas/generate?count=10" \
+  -H "Authorization: Bearer $TOKEN"
+curl --fail-with-body \
+  "http://localhost:8000/api/v1/channels/$CHANNEL_ID/ideas?status=candidate&limit=20&offset=0" \
+  -H "Authorization: Bearer $TOKEN"
+curl --fail-with-body -X POST \
+  "http://localhost:8000/api/v1/ideas/$IDEA_ID/approve" \
+  -H "Authorization: Bearer $TOKEN"
+curl --fail-with-body -X POST \
+  "http://localhost:8000/api/v1/ideas/$IDEA_ID/reject" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Generowanie nie wymaga body; `count` jest liczbą 10–20, domyślnie 10.
+Zwraca `201 {"items": [...]}`. Wymaga blueprintu z odbiorcami i przynajmniej jednym
+filarem (analiza kanału albo ręczna konfiguracja); w przeciwnym razie 409.
+Lista zwraca `items`, `total`, `limit`, `offset`, od najnowszych. Opcjonalny filtr
+`status`: candidate, approved, rejected, used. Limit 1–100, offset >= 0.
+
+Każdy pomysł zawiera tytuł, koncept, nazwę filaru, format TOP5/STORY, pomysł na hook,
+uzasadnienie i dwa pola `novelty_heuristic` / `visual_potential_heuristic` z `score`
+0–1 oraz `rationale`. To subiektywne heurystyki, nie prognoza popularności.
+TOP5 jest tematem do późniejszego researchu, a STORY fikcją — nie generujemy tu
+zweryfikowanych faktów ani scenariuszy.
+
+Generator otrzymuje blueprint, filary, język, do 20 benchmarków konkurentów i do
+100 ostatnich tematów ze wszystkich statusów. Liczba rekordów historycznych też
+trafia do kontekstu. Dłuższy kontekst jest ograniczany przez usuwanie najstarszych
+tematów, potem benchmarków; blueprint pozostaje kompletny. Historia tematów jest
+zatem kontekstem ograniczonym, nie pełnym systemem wykrywania podobieństwa.
+
+Walidacja odrzuca całą paczkę przy niepoprawnej liczbie, nieznanym filarze, formacie
+z zerową wagą, błędnej heurystyce, powtarzającym się tytule lub tytule identycznym
+z benchmarkiem przekazanym do generatora. Tytuły normalizujemy Unicode NFKC,
+casefold i białe znaki. Kontrola tytułów wobec wszystkich zapisanych pomysłów
+obejmuje też starsze rekordy poza kontekstem promptu. Nie wykrywa parafraz.
+Format mix jest wskazówką proporcji; przy małych paczkach proporcje są przybliżone.
+
+Nowe pomysły mają status `candidate`. Approve/reject zwracają `200` z pomysłem;
+ponowienie tej samej decyzji nie zmienia timestampu. Można zmienić decyzję między
+approved i rejected do czasu `used`. Status used jest zarezerwowany dla tworzenia
+video w etapie 7; oba endpointy decyzji odrzucają wtedy zmianę z 409.
+
+Nazwa filaru jest snapshotem: ponowna analiza kanału nie usuwa pomysłów.
+Zapis całej paczki jest atomowy i sprawdza zmianę kanału po wywołaniu LLM.
+Konflikt daje 409; błędy LLM 422/502/503, brak lub cudzy zasób 404.
+Tryb mock daje jawne, deterministyczne przykładowe pomysły offline. Live korzysta
+z istniejącego OpenAIProvider; każde generowanie jest nową, potencjalnie płatną akcją.
+
+Migracja `0005` tworzy `content_ideas`, ograniczenia statusów/formatów i indeksy.
+Compose stosuje ją przy starcie. Lokalnie: `uv run --no-active alembic upgrade head`.

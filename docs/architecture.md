@@ -242,3 +242,32 @@ auth/ownership, walidację wyników, konflikt edycji, rollback błędu zapisu ty
 i kaskadowe usuwanie. Ruff oraz formatowanie poprawne. Test HTTP osobnego stosu
 Docker przeszedł: readiness/docs, auth, kanał, analiza, research i lista.
 Brak płatnych calli i wyszukiwania w sieci. Następny etap: Idea Engine (6).
+
+## Etap 6 — Idea Engine
+
+ContentIdea (SQLModel, migracja 0005) ma enum statusów candidate/approved/rejected/used,
+enum formatu top5/story, snapshot nazwy filaru oraz zwalidowane heurystyki JSON.
+Kanał jest właścicielem historii przez FK CASCADE. Unikalność channel_id/title_key
+ogranicza dokładne duplikaty po normalizacji Unicode i białych znaków.
+
+Moduł ideas składa ograniczony kontekst z blueprintu, filarów, benchmarków, języka
+i poprzednich tematów, po czym zwalnia transakcję przed LLM. Zwalidowaną paczkę
+zapisuje pod blokadą kanału, sprawdzając updated_at i duplikaty w pełnej historii.
+Zmiana kanału/analizy/researchu/decyzji pomysłu w trakcie generowania powoduje 409.
+Równoległe generowania nie nadpisują się. Błąd pojedynczego zapisu wycofuje paczkę.
+
+Route handlers delegują do serwisu. Każda akcja wymaga JWT i ownership.
+Approve/reject są idempotentne, decyzje można zmieniać przed used. Tworzenie filmów
+i przejście do used nie należą do etapu 6. Oceny nie są prognozami popularności.
+Brak podobieństwa semantycznego i ograniczony kontekst historyczny są jawnymi
+ograniczeniami tej wersji. Nie kopiujemy tytułów benchmarków z przekazanego kontekstu.
+
+### Weryfikacja etapu 6 — 2026-09-27
+
+130 testów przeszło bez pominięć z PostgreSQL i Redis (13 nowych).
+Sprawdzono auth/ownership, pl/en, listę i filtry, decyzje idempotentne, ochronę used,
+walidację paczki, duplikaty, historię i benchmarki w promptach, rollback, cascade,
+zgodność migracji z metadanymi i konkurencję (jedna paczka 201, druga 409).
+Ruff i formatowanie poprawne. Test HTTP osobnego stosu Docker: tworzenie kanału,
+analiza, generowanie 20 pomysłów, lista, approve, reject. Wyłącznie mock, bez
+płatnych wywołań. Następny etap: Video Domain (7).

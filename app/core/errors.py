@@ -13,6 +13,7 @@ from app.modules.competitors.service import (
     ResearchNotReady,
     ResearchUnavailable,
 )
+from app.modules.ideas.service import IdeaConflict, IdeaNotFound, IdeasNotReady
 from app.modules.intelligence.service import AnalysisConflict
 from app.shared.llm import LLMError, LLMRefusal, LLMUnavailable
 
@@ -51,11 +52,11 @@ async def analysis_conflict(request: Request, exc: AnalysisConflict) -> JSONResp
 
 
 async def llm_error(request: Request, exc: LLMError) -> JSONResponse:
-    logger.warning("Channel analysis failed", extra={"error_type": type(exc).__name__})
+    logger.warning("LLM operation failed", extra={"error_type": type(exc).__name__})
     status = 503 if isinstance(exc, LLMUnavailable) else 422 if isinstance(exc, LLMRefusal) else 502
     return JSONResponse(
         status_code=status,
-        content={"detail": "Channel analysis could not complete"},
+        content={"detail": "LLM operation could not complete"},
         headers={"Cache-Control": "no-store"},
     )
 
@@ -73,7 +74,18 @@ async def research_error(request: Request, exc: Exception) -> JSONResponse:
     )
 
 
+async def idea_error(request: Request, exc: Exception) -> JSONResponse:
+    status, message = {
+        IdeasNotReady: (409, "Analyze the channel or configure audience and pillars first"),
+        IdeaNotFound: (404, "Idea not found"),
+        IdeaConflict: (409, "Idea is used or channel changed during generation"),
+    }[type(exc)]
+    return JSONResponse(status_code=status, content={"detail": message})
+
+
 def register_error_handlers(app: FastAPI) -> None:
+    for error in (IdeasNotReady, IdeaNotFound, IdeaConflict):
+        app.add_exception_handler(error, idea_error)
     for error in (ResearchNotReady, ResearchConflict, ResearchInvalidOutput, ResearchUnavailable):
         app.add_exception_handler(error, research_error)
     app.add_exception_handler(AnalysisConflict, analysis_conflict)
