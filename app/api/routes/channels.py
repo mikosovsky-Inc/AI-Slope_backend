@@ -1,0 +1,54 @@
+from typing import Annotated
+from uuid import UUID
+
+from fastapi import APIRouter, Query, Response
+
+from app.api.dependencies import CurrentUser, DbSession
+from app.modules.channels import service
+from app.modules.channels.models import ChannelStatus
+from app.modules.channels.schemas import ChannelCreate, ChannelDetail, ChannelPage, ChannelUpdate
+
+router = APIRouter(prefix="/channels", tags=["channels"])
+
+
+@router.post("", response_model=ChannelDetail, status_code=201)
+def create(data: ChannelCreate, user: CurrentUser, db: DbSession) -> ChannelDetail:
+    return service.create_channel(db, user.id, data)
+
+
+@router.get("", response_model=ChannelPage)
+def list_all(
+    user: CurrentUser,
+    db: DbSession,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> ChannelPage:
+    return service.list_channels(db, user.id, limit, offset)
+
+
+@router.get("/{channel_id}", response_model=ChannelDetail)
+def get(channel_id: UUID, user: CurrentUser, db: DbSession) -> ChannelDetail:
+    return service.detail(db, service.owned_channel(db, user.id, channel_id))
+
+
+@router.patch("/{channel_id}", response_model=ChannelDetail)
+def update(
+    channel_id: UUID, data: ChannelUpdate, user: CurrentUser, db: DbSession
+) -> ChannelDetail:
+    return service.update_channel(db, user.id, channel_id, data)
+
+
+@router.delete("/{channel_id}", status_code=204)
+def delete(channel_id: UUID, user: CurrentUser, db: DbSession) -> Response:
+    service.delete_channel(db, user.id, channel_id)
+    return Response(status_code=204)
+
+
+@router.post("/{channel_id}/activate", response_model=ChannelDetail)
+def activate(channel_id: UUID, user: CurrentUser, db: DbSession) -> ChannelDetail:
+    return service.change_status(db, user.id, channel_id, ChannelStatus.ACTIVE)
+
+
+@router.post("/{channel_id}/pause", response_model=ChannelDetail)
+def pause(channel_id: UUID, user: CurrentUser, db: DbSession) -> ChannelDetail:
+    return service.change_status(db, user.id, channel_id, ChannelStatus.PAUSED)

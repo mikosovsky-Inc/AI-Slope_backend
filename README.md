@@ -4,12 +4,13 @@ FastAPI + PostgreSQL, schematy API Pydantic, konfiguracja `pydantic-settings`,
 hasła Argon2id i tokeny dostępu JWT (HS256). Modele bazy i sesje korzystają z SQLModel (opartego na SQLAlchemy i Pydantic),
 a migracje z Alembic. E-maile są zapisywane małymi literami i unikalne.
 
-## Etap 1 — Foundation
+## Stan projektu — etapy 1 i 2
 
 Działający fundament modularnego monolitu: FastAPI, PostgreSQL, SQLModel,
 Alembic, Redis, kontenery, health checks, logi JSON i obsługa błędów.
 Istniejące rejestracja, logowanie JWT i role pozostają dostępne.
-Kolejne etapy (kanały, AI, generowanie filmów) nie są jeszcze wdrożone.
+Etap 2 dodaje kanały, blueprint i filary treści. Integracje AI i generowanie
+filmów nie są jeszcze wdrożone.
 Szczegóły: [docs/architecture.md](docs/architecture.md).
 
 ## Uruchomienie całego stacka
@@ -235,13 +236,98 @@ Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
 
 
-## TODO po etapie 1
+## TODO po etapie 2
 
-- Etap 2: Channel, ChannelBlueprint, ContentPillar i CRUD z kontrolą właściciela.
-- Etapy 3–10: adapter LLM, intelligence, research, pomysły, scenariusze i reżyseria.
+- Etap 3: LLMProvider, OpenAIProvider, structured outputs i mock provider.
+- Etapy 4–10: intelligence, research, pomysły, scenariusze i reżyseria.
 - Etapy 11–16: SeaweedFS, adaptery GPU/TTS, Dramatiq, FFmpeg i kontrola jakości.
 - Etapy 17–20: scheduler, panelowe API, budżety i rozszerzona obserwowalność.
 
 Na tym etapie nie ma workerów ani schedulera do uruchomienia, dostawców AI,
 pełnego video workflow ani polecenia seed/demo. Ustawienie `live` nie wykonuje
 jeszcze żadnych płatnych operacji. Zostaną dodane i przetestowane w swoich etapach.
+
+
+## Etap 2 — kanały
+
+Nowa migracja: `0003_channel_domain`. Lokalnie wykonaj
+`uv run --no-active alembic upgrade head`; w Dockerze przebuduj API:
+
+```sh
+docker compose up --build -d --wait
+```
+
+Wszystkie endpointy wymagają `Authorization: Bearer <access_token>`.
+Użytkownik widzi wyłącznie własne kanały, także gdy ma rolę `admin`.
+Próba odczytu lub modyfikacji obcego albo nieistniejącego kanału zwraca 404.
+
+| Metoda | Endpoint | Działanie |
+| --- | --- | --- |
+| POST | `/api/v1/channels` | Tworzy kanał `draft` i bazowy blueprint, 201 |
+| GET | `/api/v1/channels?limit=20&offset=0` | Lista właściciela: `items`, `total`, `limit`, `offset` |
+| GET | `/api/v1/channels/{id}` | Kanał, blueprint i uporządkowane filary |
+| PATCH | `/api/v1/channels/{id}` | Aktualizacja danych lub ręczna konfiguracja blueprintu |
+| DELETE | `/api/v1/channels/{id}` | Usuwa kanał, blueprint i filary, 204 |
+| POST | `/api/v1/channels/{id}/activate` | Ustawia `active` |
+| POST | `/api/v1/channels/{id}/pause` | Ustawia `paused` |
+
+Przykład utworzenia (TOKEN to token z endpointu logowania):
+
+```sh
+curl --fail-with-body http://localhost:8000/api/v1/channels \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"idea":"Polski kanał o dziwnych wydarzeniach historycznych","language":"pl","videos_per_day":2,"budget_per_video_usd":0.20}'
+```
+
+Walidacja etapu 2:
+
+- `name`: opcjonalne, 1–120 znaków; domyślnie pierwsze 120 znaków opisu.
+- `idea`: 10–4000 znaków po usunięciu skrajnych spacji.
+- `language`: `pl` lub `en`; pozostałe języki zwracają 422.
+- `videos_per_day`: liczba całkowita 1–24, domyślnie 2.
+- `budget_per_video_usd`: większe od 0, do 100 USD, maksymalnie 4 miejsca po przecinku.
+  W bazie NUMERIC, w Pythonie Decimal; odpowiedź JSON zawiera kwotę jako string.
+- `autopilot_mode`: `manual` (domyślnie) lub `semi_auto`; `full_auto` jeszcze niedostępne.
+- `status` i `owner_id`: nadawane wyłącznie przez backend, nie przez request.
+- Lista: `limit` 1–100, `offset` >= 0; porządek od najnowszych (created_at, id).
+- PATCH pomija nieprzesłane pola; jawne `null` i pusty PATCH dają 422.
+
+Aktywacja i pauza są idempotentne. Powtórzenie tej samej akcji nie zmienia
+`updated_at`. Zmiana statusu nie uruchamia jeszcze workera ani publikacji.
+
+Blueprint jest tworzony atomowo z kanałem: format mix TOP5 0.7/STORY 0.3,
+45 sekund, szybkie tempo, hook do 2 sekund, udział scen video 0.25.
+To edytowalne wartości początkowe, nie wynik analizy AI. Filary początkowo są puste.
+Opis, język, częstotliwość publikacji i budżet mają jedno źródło prawdy w Channel,
+a ustawienia twórcze w ChannelBlueprint.configuration (JSON walidowany Pydantic).
+Analiza i automatyczne generowanie konfiguracji pozostają na etap 4.
+
+Przykład ręcznej konfiguracji przez PATCH:
+
+```json
+{
+  "name": "Mroczne historie",
+  "autopilot_mode": "semi_auto",
+  "blueprint": {
+    "configuration": {
+      "target_audience": "Dorośli zainteresowani historią",
+      "tone": "tajemniczy",
+      "formats": {"top5": 0.7, "story": 0.3},
+      "video_style": {"duration_target": 45, "pace": "fast", "hook_max_seconds": 2},
+      "visual_style": {"description": "Ilustracje archiwalne", "video_scene_ratio": 0.25}
+    },
+    "content_pillars": [
+      {"name": "Zagadki", "description": "Niewyjaśnione wydarzenia"},
+      {"name": "Postacie", "description": "Mało znane biografie"}
+    ]
+  }
+}
+```
+
+Przesłane `blueprint` zastępuje cały blueprint i listę filarów; brakujące ustawienia
+otrzymują wartości domyślne. Pominięcie `blueprint` zachowuje go bez zmian.
+Maksymalnie 20 filarów, unikalne nazwy bez rozróżniania wielkości liter,
+pozycja wynika z kolejności listy. Format mix musi sumować się do 1.
+Usuwanie kanału jest trwałe. Aktualizacja kanału i blueprintu jest jedną transakcją;
+błąd zapisu filaru wycofuje także zmianę kanału.

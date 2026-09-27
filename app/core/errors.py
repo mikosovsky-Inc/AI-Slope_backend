@@ -6,6 +6,8 @@ from fastapi.responses import JSONResponse
 from redis.exceptions import RedisError
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.modules.channels.service import ChannelNotFound
+
 logger = logging.getLogger("app.errors")
 
 
@@ -30,7 +32,12 @@ async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
+async def channel_not_found(request: Request, exc: ChannelNotFound) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": "Channel not found"})
+
+
 def register_error_handlers(app: FastAPI) -> None:
+    app.add_exception_handler(ChannelNotFound, channel_not_found)
     app.add_exception_handler(RequestValidationError, validation_error)
     app.add_exception_handler(SQLAlchemyError, unavailable_error)
     app.add_exception_handler(RedisError, unavailable_error)

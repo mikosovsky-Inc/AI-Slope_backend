@@ -41,7 +41,7 @@ class APICORSMiddleware(CORSMiddleware):
         super().__init__(
             app,
             allow_origins=get_settings().cors_allowed_origins,
-            allow_methods=["GET", "POST"],
+            allow_methods=["GET", "POST", "PATCH", "DELETE"],
             allow_headers=["Authorization", "Content-Type"],
         )
 

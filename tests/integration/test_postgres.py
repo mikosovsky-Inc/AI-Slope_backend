@@ -58,28 +58,6 @@ def test_migration_registration_and_duplicate_email(monkeypatch, settings):
         admin_engine.dispose()
 
 
-@pytest.fixture
-def postgres_engine(monkeypatch):
-    url = os.getenv("TEST_DATABASE_URL")
-    if not url:
-        pytest.skip("Set TEST_DATABASE_URL to run against PostgreSQL")
-    schema = "test_roles_" + uuid4().hex
-    admin_engine = create_engine(url)
-    engine = create_engine(
-        url, connect_args={"options": f"-csearch_path={schema} -clock_timeout=10000"}
-    )
-    try:
-        with admin_engine.begin() as connection:
-            connection.execute(text(f'CREATE SCHEMA "{schema}"'))
-        monkeypatch.setattr("app.db.session.get_engine", lambda: engine)
-        yield engine
-    finally:
-        engine.dispose()
-        with admin_engine.begin() as connection:
-            connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
-        admin_engine.dispose()
-
-
 def test_concurrent_first_registrations(postgres_engine):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier

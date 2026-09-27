@@ -1,4 +1,4 @@
-# Architektura — etap 1 (Foundation)
+# Architektura — Foundation i Channel Domain
 
 ## Zakres i granice
 
@@ -28,7 +28,8 @@ Nie jest jeszcze brokerem działającego workflow.
 - `tests/unit`, `tests/integration`: izolowane testy oraz rzeczywiste PostgreSQL/Redis.
 
 Istniejące puste pliki przyszłych funkcji nie są implementacją modułów.
-Moduły domenowe w `app/modules/<domena>` będą powstawać od etapu 2; nie przenosimy
+Moduł kanałów działa w `app/modules/channels`; kolejne moduły
+będą powstawać w `app/modules/<domena>`; nie przenosimy
 teraz działającego auth wyłącznie dla zmiany układu folderów.
 
 ## Konfiguracja i cykl życia
@@ -84,7 +85,8 @@ opisie lokalnego uruchomienia. Storage pojawi się w etapie 11.
 
 ## Kolejne kroki
 
-Etap 2: modele kanału, blueprint i pillars, walidacja, indeksy, CRUD i ownership.
+Etap 2 ukończony: modele kanału, blueprint i pillars, walidacja, indeksy, CRUD i ownership.
+Następny etap 3: LLMProvider i OpenAIProvider ze structured outputs i trybem mock.
 Kolejne etapy obejmą cały pipeline TOP5/STORY. W etapie 1 nie ma pipeline video,
 renderera, fake filmów ani automatycznej publikacji.
 
@@ -101,3 +103,51 @@ renderera, fake filmów ani automatycznej publikacji.
 Weryfikacja korzystała z oddzielnego projektu Compose `ai-slop-foundation-check`,
 nowych wolumenów i portów 18080/15432/16379. Istniejące dane użytkownika nie były
 używane w testach. Etap 2 nie został rozpoczęty.
+
+
+## Etap 2 — Channel Domain
+
+`app/modules/channels` zawiera modele SQLModel, kontrakty Pydantic oraz serwis.
+Router wywołuje serwis i nie implementuje logiki domenowej. Rejestr modeli
+`app.models` udostępnia ich metadane Alembic. Migracja `0003` nie zmienia użytkowników.
+
+Relacje i usuwanie:
+
+```text
+User 1 → N Channel 1 → 1 ChannelBlueprint 1 → N ContentPillar
+```
+
+FK mają `ON DELETE CASCADE`. Unikalne channel_id gwarantuje jeden blueprint na kanał,
+a para blueprint_id/position — jedno miejsce filaru w kolejności.
+Composite index owner_id/created_at/id obsługuje listy właściciela;
+index status przygotowuje wybieranie aktywnych kanałów.
+Enumy status/autopilot są ograniczone także przez CHECK w PostgreSQL,
+podobnie język, częstotliwość i budżet. Kwoty to NUMERIC(10,4)/Decimal.
+
+JWT ustala owner_id. Każda operacja pobiera kanał razem z warunkiem właściciela.
+Nie ma wyjątku dla administratora. Kanał obcy i nieistniejący mają tę samą odpowiedź 404.
+Modyfikacje blokują wiersz kanału (`FOR UPDATE`) do końca transakcji.
+Odczyty nie zakładają blokady wiersza. Zmiana blueprintu zastępuje konfigurację
+oraz filary w tej samej transakcji co zmiana kanału; rollback chroni przed
+częściową aktualizacją. Usunięcie wykorzystuje kaskady bazy.
+
+W etapie 2 blueprint jest początkową konfiguracją, nie analizą AI. Wspólne parametry
+(opis, język, częstotliwość, budżet) pozostają w Channel, aby nie przechowywać dwóch
+rozbieżnych wartości. Typed configuration zawiera tone, audience, format mix,
+video style i visual style. Etap 4 rozszerzy ją o rezultaty intelligence.
+
+Statusy: draft po utworzeniu, active po activate, paused po pause. Akcje można
+powtarzać bez zmiany updated_at; pause jest dozwolone również dla draft.
+Manual i semi_auto są zapisanym wyborem; wykonanie workflow pojawi się później.
+
+Testy obejmują walidację, auth, ownership, CRUD na PostgreSQL, trwałość blueprintu,
+kaskady, idempotentne akcje, rollback błędu zapisu filaru, ograniczenia DB oraz
+zgodność migracji z metadanymi modeli i downgrade/upgrade.
+
+### Weryfikacja etapu 2 — 2026-09-27
+
+76 testów przeszło bez pominięć, z PostgreSQL i Redis. Ruff i formatowanie poprawne.
+Pełny stack zbudowano i uruchomiono w osobnym projekcie Compose.
+Test HTTP kontenera objął auth, tworzenie/listowanie/odczyt kanału, zmianę blueprintu
+z filarami, aktywację, pauzę i usunięcie. Dane testowe były w osobnych wolumenach.
+Etap 3 nie został rozpoczęty.
