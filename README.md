@@ -236,10 +236,10 @@ Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
 
 
-## TODO po etapie 6
+## TODO po etapie 8
 
-- Etap 7: domena video, state machine i tworzenie video z zatwierdzonego pomysłu.
-- Etapy 8–10: scenariusze, research faktów i reżyseria.
+- Etap 9: research faktów i scenariusze TOP5 oparte na źródłach.
+- Etap 10: Director i dobór wizualizacji.
 - Etapy 11–16: SeaweedFS, adaptery GPU/TTS, Dramatiq, FFmpeg i kontrola jakości.
 - Etapy 17–20: scheduler, panelowe API, budżety i rozszerzona obserwowalność.
 
@@ -536,7 +536,7 @@ Format mix jest wskazówką proporcji; przy małych paczkach proporcje są przyb
 
 Nowe pomysły mają status `candidate`. Approve/reject zwracają `200` z pomysłem;
 ponowienie tej samej decyzji nie zmienia timestampu. Można zmienić decyzję między
-approved i rejected do czasu `used`. Status used jest zarezerwowany dla tworzenia
+approved i rejected do czasu `used`. Status used jest nadawany przy tworzeniu
 video w etapie 7; oba endpointy decyzji odrzucają wtedy zmianę z 409.
 
 Nazwa filaru jest snapshotem: ponowna analiza kanału nie usuwa pomysłów.
@@ -547,3 +547,118 @@ z istniejącego OpenAIProvider; każde generowanie jest nową, potencjalnie pła
 
 Migracja `0005` tworzy `content_ideas`, ograniczenia statusów/formatów i indeksy.
 Compose stosuje ją przy starcie. Lokalnie: `uv run --no-active alembic upgrade head`.
+
+## Etap 7 — domena Video
+
+Utwórz film z **zatwierdzonego** pomysłu, używając JWT właściciela:
+
+```sh
+curl --fail-with-body -X POST \
+  "http://localhost:8000/api/v1/ideas/$IDEA_ID/create-video" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Endpoint nie wymaga body. Pierwsze wywołanie zwraca `201` i Video z `id`, `idea_id`,
+`status`, formatem, językiem, docelową długością, budżetem i snapshotem blueprintu.
+Status po starcie to `IDEA_GENERATED`. Pomysł atomowo przechodzi do `used`.
+Candidate/rejected (lub used bez istniejącego filmu) dają 409. Brak JWT daje 401,
+nieistniejący/cudzy pomysł 404. Admin również musi być właścicielem.
+
+Jeden pomysł może utworzyć tylko jeden film. Ponowienie zwraca `200` z tym samym
+Video i jego aktualnym statusem — nie resetuje workflow ani historii. Dotyczy to
+również równoczesnych żądań. Nie trzeba przesyłać osobnego klucza idempotencji.
+Budżet, długość i blueprint są snapshotem chwili utworzenia; tytuł, język i format
+pochodzą z pomysłu. Późniejsza edycja kanału nie zmienia istniejącego filmu.
+
+Maszyna stanów:
+
+```text
+DRAFT → IDEA_GENERATED
+  TOP5: → RESEARCHING → RESEARCHED → SCRIPTING
+  STORY: → SCRIPTING
+→ SCRIPT_READY → GENERATING_ASSETS → ASSETS_READY
+→ GENERATING_AUDIO → READY_TO_RENDER → RENDERING
+→ QUALITY_CHECK → READY → PUBLISHED
+```
+
+Z każdego stanu poza FAILED/PUBLISHED można przejść do FAILED. FAILED i PUBLISHED
+są na razie końcowe; recovery/retry będą projektowane z jobami w kolejnych etapach.
+Powtórzenie bieżącego stanu jest no-op. Nie ma publicznego endpointu dowolnej
+zmiany statusu. Wewnętrzny `transition_video` blokuje rekord filmu, waliduje przejście
+oraz zapisuje status i `VideoStatusEvent` w transakcji zarządzanej przez wywołującego.
+Opcjonalny `expected_status` odrzuca przejście, gdy oczekiwany stan jest nieaktualny.
+Powód przejścia ma być krótkim, bezpiecznym opisem/kodem, bez surowych błędów providera.
+
+Przy tworzeniu zapisujemy zdarzenia `null → DRAFT` i `DRAFT → IDEA_GENERATED`.
+Historia ma rosnącą sekwencję, poprzedni/nowy status, powód i timestamp.
+Kolejny etap workflow jeszcze nie jest wykonywany: **nie powstaje gotowy film,
+scenariusz ani sceny**. W etapie 8 powstanie generator scenariuszy STORY, w etapie 9
+research TOP5, a w etapie 14 worker. Start workflow na tym etapie jest trwałym
+przygotowaniem Video w stanie IDEA_GENERATED, bez uruchamiania pustego zadania.
+
+Dodano SQLModel `VideoScript` (jeden na film) i `Scene` (kolejne pozycje w skrypcie)
+oraz wejściowe schematy Pydantic. Scena ma czas trwania, narrację, prompt, typ
+image/video/stock/none, ruch kamery, nastrój i wyróżnienia napisów. Walidacja sumy
+czasów oraz generowanie/zapis scenariusza należą do etapu 8. Nie tworzymy pustych
+skryptów przy POST create-video. Encje video są połączone z kanałem przez ContentIdea.
+Usunięcie kanału kaskadowo usuwa pomysły, filmy, historię, skrypty i sceny.
+
+Migracja `0006` dodaje tabele, enumy, unikalności i ograniczenia DB. Compose wykonuje
+ją przy starcie; lokalnie: `uv run --no-active alembic upgrade head`.
+
+## Etap 8 — STORY Script Engine
+
+Po zatwierdzeniu pomysłu STORY i utworzeniu Video uruchom jawnie generowanie:
+
+```sh
+curl --fail-with-body -X POST \
+  "http://localhost:8000/api/v1/videos/$VIDEO_ID/script/generate" \
+  -H "Authorization: Bearer $TOKEN"
+curl --fail-with-body \
+  "http://localhost:8000/api/v1/videos/$VIDEO_ID/script" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Oba endpointy wymagają JWT właściciela i zwracają `200` ze skryptem. Cudzy lub
+nieistniejący film/skrypt daje 404, brak JWT 401. POST nie wymaga body. Działa dla
+STORY w IDEA_GENERATED; TOP5, trwające generowanie i FAILED dają 409.
+Jeżeli skrypt już istnieje, ponowny POST zwraca go bez wywołań LLM i bez zmiany stanu.
+
+Pipeline wykonuje trzy wywołania LLMProvider:
+
+1. `StoryOutline`: zarys hook → setup → escalation → reveal → twist.
+2. `StoryNarrative`: pełna narracja tych pięciu części na podstawie zarysu.
+3. `StoryScenes`: podział narracji na 5–50 scen, prompty wizualne i czasy.
+
+Kontekst obejmuje koncept/hook pomysłu, tytuł, język, docelową długość i zapisany
+snapshot blueprintu Video. Każda odpowiedź jest walidowana przez Pydantic.
+Suma duration musi mieścić się w ±10% duration_target, pozycje scen zaczynają się
+od 1 i są kolejne. Hook jest pierwszą sceną i mieści się w hook_max_seconds.
+Tytuł, język i duration_target nie mogą zmienić się w odpowiedzi modelu.
+Narracja scen musi odtwarzać całą historię w kolejności; porównanie ignoruje tylko
+białe znaki. Puste prompty i brakujące części są odrzucane. Czas jest szacunkiem
+scenariusza; faktyczny czas audio będzie znany dopiero przy TTS.
+
+Stan SCRIPTING jest zapisywany przed wywołaniem providera, co blokuje drugi kosztowny
+request. Wywołania zewnętrzne nie trzymają transakcji ani blokady bazy. Zarys,
+historia, VideoScript, Scene i przejście do SCRIPT_READY zapisują się atomowo.
+Błąd providera/walidacji/zapisu usuwa częściowe efekty transakcji i zapisuje FAILED
+z bezpiecznym kodem w historii. Błędy modelu zwracają 422/502/503 zależnie od rodzaju.
+Przy niedostępnej bazie zapis FAILED może się nie udać; log rejestruje ten przypadek.
+
+To nadal synchroniczny endpoint w threadpool. Awaria procesu po zapisie SCRIPTING
+może pozostawić film w tym stanie; nie uruchamiamy automatycznie kolejnych płatnych
+prób. Trwałe joby, wykrywanie przerwanego zadania i recovery należą do etapu 14.
+FAILED pozostaje stanem końcowym zgodnie z etapem 7; endpoint retry nie został dodany.
+
+Mock zawiera jawną przykładową fikcyjną historię PL/EN i deterministyczne sceny.
+Nie interpretuje kreatywnie każdej niszy; służy do testowania przepływu offline.
+Live korzysta z OpenAIProvider i jego timeout/retries. Trzy kroki mogą oznaczać trzy
+płatne wywołania (plus ograniczone ponowienia SDK). Nie wykonujemy dodatkowych
+ponowień po błędach walidacji. Director z etapu 10 dobierze docelowe typy wizualne;
+mock używa obrazów. Render i audio nie są jeszcze generowane.
+
+Migracja `0007` dodaje do video_scripts JSON `outline` i `story`, zachowując stare
+rekordy z pustymi obiektami. Istniejące etapy nie tworzyły skryptów przez API;
+puste rekordy wprowadzone ręcznie nie stanowią prawidłowego scenariusza STORY.
+Compose stosuje migrację przy starcie. Lokalnie: `uv run --no-active alembic upgrade head`.

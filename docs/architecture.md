@@ -271,3 +271,71 @@ zgodność migracji z metadanymi i konkurencję (jedna paczka 201, druga 409).
 Ruff i formatowanie poprawne. Test HTTP osobnego stosu Docker: tworzenie kanału,
 analiza, generowanie 20 pomysłów, lista, approve, reject. Wyłącznie mock, bez
 płatnych wywołań. Następny etap: Video Domain (7).
+
+## Etap 7 — Video Domain
+
+Video odwołuje się do ContentIdea przez unikalny idea_id, a własność i kanał
+wynikają z idei. Nie duplikujemy channel_id w tabeli Video. Blueprint i budżet
+są historycznym snapshotem; zmiany kanału nie modyfikują już utworzonego filmu.
+VideoScript ma unikalny video_id, Scene unikalną parę script_id/position.
+Scene ma Numeric duration i enum typu wizualnego. Migracja 0006 dodaje te encje
+oraz VideoStatusEvent z enumami statusów i unikalną sekwencją per video.
+
+Create-video wymaga JWT i właściciela. Pobiera blokadę kanału (ta sama kolejność
+co approve/reject), ponownie odczytuje pomysł i sprawdza istniejący film. Tworzenie,
+przejście DRAFT → IDEA_GENERATED, historia i oznaczenie idei used są atomowe.
+Ponowienie zwraca istniejący rekord, także po późniejszych zmianach stanu.
+
+Maszyna stanów jest oddzielną funkcją domenową; TOP5 nie pomija researchu,
+STORY może wejść bezpośrednio w SCRIPTING. Wewnętrzna operacja transition_video
+blokuje wiersz Video, odczytuje aktualny status i dopisuje sekwencyjne zdarzenie.
+Wywołujący zarządza commit/rollback, żeby status i efekt przyszłego kroku workflow
+(np. zapis skryptu) mogły stanowić jedną transakcję. Brak publicznego endpointu
+arbitralnej zmiany stanu. FAILED przechowuje bezpieczny powód w historii;
+retry/recovery wymaga osobnego projektu z jobami, a nie swobodnego cofania stanów.
+
+Workflow w etapie 7 zatrzymuje się trwale na IDEA_GENERATED. Nie udajemy wykonania
+researchu/scenariusza/renderu. Generatory oraz workery zostaną dołączone w swoich
+etapach. Maszyna stanów określa legalną kolejność; walidację artefaktów poszczególnych
+kroków zapewnią ich serwisy. Skrypty i sceny nie są jeszcze tworzone przez endpoint.
+
+### Weryfikacja etapu 7 — 2026-09-27
+
+139 testów przeszło bez pominięć z PostgreSQL i Redis (9 nowych).
+Testy obejmują maszynę stanów TOP5/STORY, idempotencję tworzenia i przejść,
+auth/ownership, snapshoty, used, rollback historii i pomysłu, równoległe żądania
+(jedno 201, drugie 200, jeden film), kaskady, ograniczenia DB i zgodność migracji
+z metadanymi. Ruff i formatowanie poprawne. Test HTTP izolowanego stosu Docker:
+rejestracja, kanał, analiza, pomysły, approve, create-video, ponowienie, ochrona used.
+Brak płatnych wywołań i generowania scenariuszy/mediów. Następny etap: STORY Script Engine (8).
+
+## Etap 8 — STORY Script Engine
+
+Moduł scripts korzysta wyłącznie z LLMProvider. Trzy wymagane schematy Pydantic
+opisują zarys, pełną historię i sceny. Narracja ma pięć obowiązkowych części:
+hook/setup/escalation/reveal/twist. Migracja 0007 utrwala outline/story w VideoScript.
+Sceny zachowują uniwersalny format modelu z etapu 7.
+
+POST /videos/{id}/script/generate sprawdza ownership i format, następnie pod blokadą
+Video zmienia IDEA_GENERATED → SCRIPTING i zatwierdza transakcję. Inny request widzi
+SCRIPTING i zwraca 409. Po wywołaniach LLM zapisuje skrypt, sceny i SCRIPT_READY
+w jednej transakcji. Odczyt/replay gotowego skryptu nie generuje kosztów.
+Sceny muszą zachować całą narrację, język/tytuł/duration celu, pierwszą scenę hook
+oraz sumę czasu w tolerancji 10%. Nie jest to pomiar audio ani gwarancja spójności
+literackiej; takie oceny wymagają kolejnych etapów jakości.
+
+Przy błędzie cofamy zapis i próbujemy trwale ustawić FAILED z bezpiecznym kodem.
+Brak możliwości zapisu błędu jest logowany. Nie ma automatycznego resume po śmierci
+procesu; SCRIPTING może wymagać recovery przewidzianego z trwałymi jobami w etapie 14.
+Obecny request jest synchroniczny, a status blokuje duplikaty bez utrzymywania
+transakcji podczas LLM. Nie wykonujemy TOP5 bez researchu i nie generujemy mediów.
+
+### Weryfikacja etapu 8 — 2026-09-28
+
+151 testów przeszło bez pominięć z PostgreSQL i Redis (12 nowych). Sprawdzono
+PL/EN, przekazywanie wyników między trzema krokami, pełny zapis i replay,
+auth/ownership, blokadę TOP5, walidację narracji/czasu/hooka/kolejności,
+FAILED po błędach, brak częściowych skryptów, równoległy request 409 oraz rollback
+błędu zapisu scen na PostgreSQL. Migracje odpowiadają metadanym. Ruff i formatowanie
+poprawne. Test HTTP kontenera przeszedł od kanału i idei do skryptu, odczytu,
+replay i SCRIPT_READY. Wyłącznie mock, bez płatnych calli. Następny etap: TOP5 Research Engine (9).

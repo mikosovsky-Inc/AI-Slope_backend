@@ -15,6 +15,8 @@ from app.modules.competitors.service import (
 )
 from app.modules.ideas.service import IdeaConflict, IdeaNotFound, IdeasNotReady
 from app.modules.intelligence.service import AnalysisConflict
+from app.modules.scripts.service import ScriptConflict, ScriptNotFound
+from app.modules.videos.service import VideoRequiresApprovedIdea
 from app.shared.llm import LLMError, LLMRefusal, LLMUnavailable
 
 logger = logging.getLogger("app.errors")
@@ -83,7 +85,23 @@ async def idea_error(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=status, content={"detail": message})
 
 
+async def video_not_ready(request: Request, exc: VideoRequiresApprovedIdea) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": "An approved idea is required"})
+
+
+async def script_error(request: Request, exc: Exception) -> JSONResponse:
+    status, message = (
+        (404, "Video or script not found")
+        if isinstance(exc, ScriptNotFound)
+        else (409, "Requires an idle STORY video; generation may already be running or have failed")
+    )
+    return JSONResponse(status_code=status, content={"detail": message})
+
+
 def register_error_handlers(app: FastAPI) -> None:
+    app.add_exception_handler(ScriptNotFound, script_error)
+    app.add_exception_handler(ScriptConflict, script_error)
+    app.add_exception_handler(VideoRequiresApprovedIdea, video_not_ready)
     for error in (IdeasNotReady, IdeaNotFound, IdeaConflict):
         app.add_exception_handler(error, idea_error)
     for error in (ResearchNotReady, ResearchConflict, ResearchInvalidOutput, ResearchUnavailable):

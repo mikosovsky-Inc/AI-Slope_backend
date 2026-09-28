@@ -13,8 +13,18 @@ def create_llm_provider(settings: Settings) -> LLMProvider:
         from app.modules.ideas.schemas import GeneratedIdeas
         from app.modules.intelligence.mock import mock_analysis
         from app.modules.intelligence.schemas import ChannelAnalysis
+        from app.modules.scripts.mock import mock_beats, mock_scenes
+        from app.modules.scripts.schemas import StoryNarrative, StoryOutline, StoryScenes
 
-        return MockLLMProvider({ChannelAnalysis: mock_analysis, GeneratedIdeas: mock_ideas})
+        return MockLLMProvider(
+            {
+                ChannelAnalysis: mock_analysis,
+                GeneratedIdeas: mock_ideas,
+                StoryOutline: mock_beats,
+                StoryNarrative: mock_beats,
+                StoryScenes: mock_scenes,
+            }
+        )
     if not settings.openai_api_key or not settings.openai_api_key.get_secret_value().strip():
         raise ValueError("OPENAI_API_KEY is required in live mode")
     if not settings.openai_model.strip():

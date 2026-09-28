@@ -1,13 +1,15 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Response
 
 from app.api.dependencies import CurrentUser, DbSession
 from app.integrations.llm.factory import CurrentLLM
 from app.modules.ideas.models import IdeaStatus
 from app.modules.ideas.schemas import IdeaBatch, IdeaPage, IdeaRead
 from app.modules.ideas.service import decide_idea, generate_ideas, list_ideas
+from app.modules.videos.schemas import VideoRead
+from app.modules.videos.service import create_video
 
 router = APIRouter(tags=["ideas"])
 
@@ -43,3 +45,15 @@ def approve(idea_id: UUID, user: CurrentUser, db: DbSession) -> IdeaRead:
 @router.post("/ideas/{idea_id}/reject", response_model=IdeaRead)
 def reject(idea_id: UUID, user: CurrentUser, db: DbSession) -> IdeaRead:
     return decide_idea(db, user.id, idea_id, IdeaStatus.REJECTED)
+
+
+@router.post(
+    "/ideas/{idea_id}/create-video",
+    response_model=VideoRead,
+    status_code=201,
+    responses={200: {"model": VideoRead, "description": "Existing video"}},
+)
+def create(idea_id: UUID, user: CurrentUser, db: DbSession, response: Response) -> VideoRead:
+    result, created = create_video(db, user.id, idea_id)
+    response.status_code = 201 if created else 200
+    return result
