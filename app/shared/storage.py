@@ -31,6 +31,10 @@ class StorageProvider(Protocol):
         """Read from the current stream position. Reusing a key replaces that object."""
         ...
 
+    def download(self, key: str, target: BinaryIO) -> StoredObject:
+        """Copy a private object into a caller-owned stream with the storage size limit."""
+        ...
+
     def get_url(self, key: str) -> str:
         """Internal file URI (local) or expiring bearer download URL (S3)."""
         ...

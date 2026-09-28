@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     redis_url: RedisDsn = "redis://localhost:6379/0"
     redis_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    ffmpeg_binary: str = "ffmpeg"
+    ffprobe_binary: str = "ffprobe"
+    render_timeout_seconds: int = Field(default=600, ge=10, le=1800)
+    render_threads: int = Field(default=2, ge=1, le=8)
+    render_max_input_bytes: int = Field(default=536870912, ge=1048576, le=2147483648)
     tasks_eager: bool = False  # Test harness only: retain direct service assertions.
     task_dispatch_interval_seconds: float = Field(default=2, ge=0.1, le=60)
     task_lease_seconds: int = Field(default=300, ge=30, le=3600)

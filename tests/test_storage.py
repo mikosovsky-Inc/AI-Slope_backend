@@ -153,3 +153,36 @@ def test_storage_factory_and_config(settings, tmp_path):
     ]:
         with pytest.raises(ValidationError):
             Settings(**(settings.model_dump() | overrides), _env_file=None)
+
+
+def test_private_local_download_verifies_digest(tmp_path):
+    storage = LocalStorageProvider(tmp_path)
+    stored = storage.put("private/input", BytesIO(b"private-data"), content_type="video/mp4")
+    target = BytesIO()
+    downloaded = storage.download(stored.key, target)
+    assert downloaded.sha256 == stored.sha256
+    assert downloaded.size_bytes == stored.size_bytes
+    assert target.getvalue() == b"private-data"
+    with pytest.raises(ValueError):
+        storage.download("../escape", BytesIO())
+
+
+def test_private_s3_download_closes_body_and_enforces_limit(s3_settings):
+    from botocore.response import StreamingBody
+
+    storage = S3StorageProvider(s3_settings)
+    body = StreamingBody(BytesIO(b"private-data"), 12)
+    try:
+        with Stubber(storage.client) as stub:
+            stub.add_response(
+                "get_object",
+                {"Body": body, "ContentType": "video/mp4"},
+                {"Bucket": s3_settings.s3_bucket, "Key": "private/input"},
+            )
+            target = BytesIO()
+            stored = storage.download("private/input", target)
+            assert stored.size_bytes == 12
+            assert target.getvalue() == b"private-data"
+            assert body._raw_stream.closed
+    finally:
+        storage.close()

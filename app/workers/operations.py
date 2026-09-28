@@ -77,6 +77,10 @@ def execute_operation(db: Session, task: Task, settings: Settings) -> dict:
                 managed(stack, create_storage_provider),
                 settings,
             )
+        elif kind == TaskKind.RENDER:
+            from app.modules.render.service import RenderService
+
+            return RenderService(settings, managed(stack, create_storage_provider)).render(db, task)
         elif kind in (TaskKind.IMAGE, TaskKind.VIDEO):
             return visual(db, task, managed(stack, create_generation_provider), settings)
         else:
@@ -94,9 +98,36 @@ def visual(db: Session, task: Task, provider, settings: Settings) -> dict:
             VideoScript.video_id == task.video_id,
         )
     ).one()
-    data = {"request_id": str(task.id), "prompt": scene.visual_prompt}
+    from app.modules.render.visuals import materialize_visual, output_key
+
+    data = {
+        "request_id": str(task.id),
+        "prompt": scene.visual_prompt,
+        "parameters": {"output_key": output_key(task), "output_bucket": settings.s3_bucket},
+    }
+    completed = task.checkpoint.get("completed_visual")
+    if completed is not None:
+        storage = create_storage_provider(settings)
+        try:
+            asset = materialize_visual(
+                db, task, settings, storage, completed, float(scene.duration)
+            )
+            return {"asset_id": str(asset.id), "status": "succeeded"}
+        finally:
+            storage.close()
     reference = task.checkpoint.get("provider_job")
-    if reference:
+    if reference and settings.external_providers_mode == "mock":
+        # Mock jobs are process-local and free; reconstruct after a worker restart.
+        result = (
+            provider.generate_image(ImageGenerationRequest(**data))
+            if task.kind == TaskKind.IMAGE
+            else provider.generate_video(
+                VideoGenerationRequest(**data, duration_seconds=float(scene.duration))
+            )
+        )
+        result = provider.get_status(result.job)
+        result = provider.get_status(result.job)
+    elif reference:
         result = provider.get_status(GenerationJobRef.model_validate(reference))
     else:
         if task.checkpoint.get("submit_started"):
@@ -121,7 +152,17 @@ def visual(db: Session, task: Task, provider, settings: Settings) -> dict:
         raise PollLater
     if result.status != ProviderJobStatus.SUCCEEDED:
         raise ValueError("Provider generation failed")
-    return result.model_dump(mode="json")
+    task.checkpoint = task.checkpoint | {"completed_visual": result.output or {}}
+    db.add(task)
+    db.commit()
+    storage = create_storage_provider(settings)
+    try:
+        asset = materialize_visual(
+            db, task, settings, storage, result.output or {}, float(scene.duration)
+        )
+        return result.model_dump(mode="json") | {"asset_id": str(asset.id)}
+    finally:
+        storage.close()
 
 
 def recover_result(db: Session, task: Task) -> dict | None:

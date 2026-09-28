@@ -160,7 +160,9 @@ def test_queued_task_rejects_foreign_scene(client, db, story_factory):
     )
 
 
-def test_visual_poll_checkpoint_and_backoff(client, db, settings, story_factory, monkeypatch):
+def test_visual_poll_checkpoint_and_backoff(
+    client, db, settings, story_factory, monkeypatch, tmp_path
+):
     from app.shared.generation import GenerationJobRef, GenerationResult, GenerationUnavailable
 
     headers, path, _, _ = story_factory(client)
@@ -168,12 +170,27 @@ def test_visual_poll_checkpoint_and_backoff(client, db, settings, story_factory,
     scene = db.exec(select(Scene)).first()
     settings.tasks_eager = False
     settings.external_providers_mode = "live"
+    settings.storage_local_root = tmp_path / "assets"
+    from app.integrations.storage.factory import create_storage_provider
+    from app.modules.render.engine import FFmpegRenderer
+
+    image = tmp_path / "image.png"
+    FFmpegRenderer(settings).run(
+        ["-f", "lavfi", "-i", "color=s=32x32", "-frames:v", "1", str(image)]
+    )
     calls = {"submit": 0, "poll": 0}
+    output = {}
     reference = GenerationJobRef(provider="runpod", endpoint_id="ep", job_id="remote")
 
     class Provider:
         def generate_image(self, request):
             calls["submit"] += 1
+            key = request.parameters["output_key"]
+            storage = create_storage_provider(settings)
+            with image.open("rb") as source:
+                storage.put(key, source, content_type="image/png")
+            storage.close()
+            output.update(object_key=key, content_type="image/png")
             return GenerationResult(job=reference, status="queued")
 
         def get_status(self, job):
@@ -181,7 +198,7 @@ def test_visual_poll_checkpoint_and_backoff(client, db, settings, story_factory,
             calls["poll"] += 1
             if calls["poll"] == 1:
                 raise GenerationUnavailable("temporary")
-            return GenerationResult(job=reference, status="succeeded", output={"asset": "test"})
+            return GenerationResult(job=reference, status="succeeded", output=output)
 
         def close(self):
             pass

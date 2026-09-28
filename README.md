@@ -4,12 +4,12 @@ FastAPI + PostgreSQL, schematy API Pydantic, konfiguracja `pydantic-settings`,
 hasła Argon2id i tokeny dostępu JWT (HS256). Modele bazy i sesje korzystają z SQLModel (opartego na SQLAlchemy i Pydantic),
 a migracje z Alembic. E-maile są zapisywane małymi literami i unikalne.
 
-## Stan projektu — etapy 1–14
+## Stan projektu — etapy 1–15
 
 Modularny monolit FastAPI z JWT, PostgreSQL/SQLModel, Redis i SeaweedFS.
 Działa analiza kanału, pomysły, scenariusze STORY/TOP5, Director, adaptery
-Runpod/TTS oraz asynchroniczne zadania Dramatiq. Rendering i quality control
-pozostają na kolejne etapy. Szczegóły: [docs/architecture.md](docs/architecture.md).
+Runpod/TTS, asynchroniczne zadania Dramatiq i renderer FFmpeg. Kontrola jakości
+pozostaje na etap 16. Szczegóły: [docs/architecture.md](docs/architecture.md).
 
 **Od etapu 14 operacje generowania zwracają `202` i zadanie, a wynik odbiera się
 przez GET /api/v1/tasks/{id}.** Opisy wcześniejszych etapów dokumentują także
@@ -239,9 +239,8 @@ Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
 
 
-## TODO po etapie 14
+## TODO po etapie 15
 
-- Etap 15: FFmpeg, materializacja wyników wizualnych i składanie finalnego filmu.
 - Etap 16: kontrola jakości.
 - Etapy 17–20: scheduler, panelowe API, budżety i rozszerzona obserwowalność.
 
@@ -1154,8 +1153,7 @@ MockTransport, bez połączeń do ElevenLabs i bez kosztów GPU/TTS.
 Wybrano **Dramatiq + Redis**: wykorzystuje istniejący Redis, ma prosty model actorów
 i wystarcza do modularnego monolitu. PostgreSQL pozostaje źródłem stanu zadania;
 Redis przenosi wyłącznie jego UUID. Kolejki: `content`, `research`, `image`, `video`,
-`audio`, `render`, `quality`. Dwie ostatnie są przygotowane, ale bez implementacji
-renderera i kontroli jakości z etapów 15–16.
+`audio`, `render`, `quality`. Kolejka `render` jest obsługiwana od etapu 15; `quality` czeka na etap 16.
 [Zasady dostarczania Dramatiq](https://dramatiq.io/best_practices.html).
 
 ### Uruchomienie
@@ -1235,10 +1233,9 @@ Automatyczny łańcuch na tym etapie:
 
 TOP5 nadal wymaga prawdziwego korpusu źródeł; pusty LocalResearchProvider zatrzymuje
 przetwarzanie jako failed, zamiast wymyślać fakty. Nie dodano wyszukiwarki.
-Audio zlecane osobno zapisuje prawdziwy Asset i CostEvent. Zadania wizualne
-uruchamiają adapter Runpod i zapisują referencję oraz JSON wyniku providera;
-nie materializują jeszcze jego plików w Asset. Mock wizualny nadal nie generuje
-PNG/MP4. Nie ustawiamy ASSETS_READY ani READY_TO_RENDER na podstawie samego JSON.
+Audio zlecane osobno zapisuje prawdziwy Asset i CostEvent. Od etapu 15 zadania
+wizualne zapisują również Asset, a mock generuje techniczne PNG/MP4. Po ukończeniu
+wszystkich scen można osobno zlecić render opisany poniżej.
 
 ### Dostarczanie, ponowienia i restart
 
@@ -1263,3 +1260,83 @@ Jeśli proces zginął podczas niejednoznacznego LLM/TTS/submitu Runpod, zadanie
 do needs_review zamiast powtarzać płatną operację. Nie ma jeszcze publicznego
 endpointu zatwierdzania takich ponowień; należy najpierw ustalić wynik u dostawcy.
 Nie obiecujemy atomowej transakcji PostgreSQL–Redis–provider ani exactly-once GPU.
+
+## Etap 15 — Render Engine
+
+`RenderService` pobiera scenariusz i assety filmu ze SQLModel oraz prywatnego storage.
+Silnik `FFmpegRenderer` operuje wyłącznie na lokalnych plikach, bez zależności od
+OpenAI/Runpoda. Składa obrazy PNG/JPEG i klipy MP4 w pionowy `final.mp4`:
+1080×1920, H.264/yuv420p, AAC 48 kHz stereo, 30 fps, `faststart`.
+Obrazy obsługują `zoom_in`, `zoom_out`, `pan_left`, `pan_right`, `static`.
+Klipy są przycinane do pionowego kadru i zapętlane do długości sceny; ich własna
+ścieżka audio jest pomijana. Narracja jest uzupełniana ciszą do końca sceny;
+zbyt długa narracja powoduje błąd zamiast jej ucięcia.
+
+Napisy ASS są wypalane w filmie i przechowywane jako osobny Asset. Korzystają
+z alignmentu TTS; bez niego dzielą tekst na fragmenty o równych przedziałach czasu.
+Opcjonalna muzyka jest zapętlana, ściszana do 12% i dodatkowo automatycznie
+wyciszana podczas narracji (`sidechaincompress`). Opis filtrów:
+[dokumentacja FFmpeg](https://ffmpeg.org/ffmpeg-filters.html).
+
+### Przepływ API (wszystkie wywołania wymagają JWT właściciela)
+
+1. Poczekaj na zakończenie Directora i odczytaj `GET /api/v1/videos/{video_id}/direction`
+   — `scenes[].id` to identyfikatory scen do kolejnych wywołań.
+2. Dla każdej sceny zleć `POST /api/v1/videos/{video_id}/visuals/image` lub `/visuals/video`
+   zgodnie z `visual_type`, oraz `POST /api/v1/videos/{video_id}/audio`.
+   Body obu operacji: `{"scene_id":"UUID"}`. Poczekaj na `succeeded` wszystkich zadań.
+3. `POST /api/v1/videos/{video_id}/render` z body `{}` albo
+   `{"music_asset_id":"UUID"}` zwraca `202` i Task. Muzyka musi być istniejącym
+   assetem audio tego samego filmu; upload/biblioteka muzyczna nie są częścią tego etapu.
+4. Odpytuj `GET /api/v1/tasks/{task_id}`. Wynik zawiera `asset_id`,
+   `subtitle_asset_id` oraz `status: "QUALITY_CHECK"`.
+5. `GET /api/v1/assets/{asset_id}/download` pobiera plik przez uwierzytelnione API.
+   `GET /api/v1/videos/{video_id}/assets` zwraca listę plików bez kluczy storage i sekretów.
+
+Render zawsze działa asynchronicznie. Obsługuje nagłówek `Idempotency-Key`.
+Pierwsze wykonanie zapisuje w Task niezmienny manifest: kolejność, tekst, ruch,
+czas scen oraz najnowsze pasujące assety. Blokada filmu zapobiega równoległym
+renderom różnych zadań. Brak assetów nie przesuwa filmu do następnego stanu.
+Gotowy plik, napisy i przejście `RENDERING → QUALITY_CHECK` są zatwierdzane razem.
+Nie ustawiamy `READY` — to zadanie kontroli jakości w kolejnym etapie.
+
+Po restarcie worker może odtworzyć lokalny render z manifestu lub odzyskać
+już zapisany wynik. Błędy FFmpeg/storage mają ograniczone ponowienia; wyczerpanie
+prób pozostawia zadanie `needs_review` i film `RENDERING` do interwencji operatora.
+Nie ma jeszcze panelu ani endpointu ręcznego wznowienia takiego zadania.
+Niepewny commit nie usuwa plików: stabilne klucze zostaną nadpisane przy wznowieniu.
+Usuwanie osieroconych obiektów po trwałej awarii pozostaje zadaniem utrzymaniowym.
+
+### Wyniki wizualne Runpoda
+
+Mock zapisuje techniczne obrazy i klipy testowe, nie wizualizacje AI. W trybie live
+worker Runpoda otrzymuje `parameters.output_key` i `parameters.output_bucket`.
+Musi zapisać PNG/MP4 w tym bucketcie przy użyciu własnej konfiguracji S3 i zwrócić:
+
+```json
+{"object_key":"generated/TASK_UUID/visual.png","content_type":"image/png"}
+```
+
+Dla video: `visual.mp4` i `video/mp4`. Backend akceptuje wyłącznie dokładnie
+przydzielony klucz. Nie pobiera dowolnych URL ani obiektów przypisanych innym zadaniom.
+Produkcja wymaga dostosowania workera Runpoda do tego kontraktu; nie testowano
+płatnego endpointu live. JSON ukończonego providera jest zapisywany przed importem
+pliku, więc wznowienie nie musi ponawiać generowania.
+
+### Uruchomienie i limity
+
+Obraz Docker i GitHub Actions instalują FFmpeg, ffprobe i font DejaVu Sans.
+Lokalnie zainstaluj FFmpeg z libx264/libass oraz font DejaVu Sans. Migracja `0013`
+dodaje rodzaj zadania `render`. Po aktualizacji: `docker compose up --build -d`.
+
+Konfiguracja `.env`: `FFMPEG_BINARY`, `FFPROBE_BINARY`, `RENDER_TIMEOUT_SECONDS=600`,
+`RENDER_THREADS=2`, `RENDER_MAX_INPUT_BYTES=536870912` (suma wejść).
+`STORAGE_MAX_BYTES` nadal ogranicza każdy plik, także końcowy MP4.
+Maksimum: 100 scen i 180 sekund filmu. Worker potrzebuje miejsca tymczasowego
+na wejścia, zakodowane klipy i finalny film. Timeout obejmuje pracę FFmpeg całego
+renderu; transfery storage mają osobne timeouty adaptera.
+
+Pobrane pliki są weryfikowane przez rozmiar i SHA-256. FFmpeg dostaje konkretne
+demuxery i whitelistę protokołów `file,pipe`; napisy nie mogą wstrzykiwać poleceń ASS.
+Brak jeszcze oceny jakości, automatycznej publikacji i automatycznego wyzwalania
+renderu po ukończeniu wszystkich assetów — to kolejne etapy.

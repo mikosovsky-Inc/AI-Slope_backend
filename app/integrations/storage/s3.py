@@ -58,6 +58,24 @@ class S3StorageProvider:
         except (BotoCoreError, ClientError, OSError):
             raise StorageError("S3 storage unavailable") from None
 
+    def download(self, key: str, target: BinaryIO) -> StoredObject:
+        validate_key(key)
+        try:
+            response = self.client.get_object(Bucket=self.bucket, Key=key)
+            source = response["Body"]
+            try:
+                return copy_object(
+                    source,
+                    target,
+                    key=key,
+                    content_type=response.get("ContentType", "application/octet-stream"),
+                    max_bytes=self.max_bytes,
+                )
+            finally:
+                source.close()
+        except (BotoCoreError, ClientError, OSError):
+            raise StorageError("S3 storage unavailable") from None
+
     def get_url(self, key: str) -> str:
         validate_key(key)
         try:

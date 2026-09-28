@@ -68,6 +68,9 @@ jobs:
           python-version: "3.12"
           enable-cache: true
 
+      - name: Install FFmpeg and fonts
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+
       - name: Install dependencies from lockfile
         run: uv sync --locked --dev
 

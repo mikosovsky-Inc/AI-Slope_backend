@@ -44,6 +44,20 @@ class LocalStorageProvider:
             if temporary is not None:
                 Path(temporary).unlink(missing_ok=True)
 
+    def download(self, key: str, target: BinaryIO) -> StoredObject:
+        path = self._path(key)
+        try:
+            with path.open("rb") as source:
+                return copy_object(
+                    source,
+                    target,
+                    key=key,
+                    content_type="application/octet-stream",
+                    max_bytes=self.max_bytes,
+                )
+        except OSError:
+            raise StorageError("Local storage unavailable") from None
+
     def get_url(self, key: str) -> str:
         path = self._path(key)
         if not path.is_file():

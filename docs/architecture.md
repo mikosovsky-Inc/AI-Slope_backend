@@ -617,4 +617,42 @@ Test całego Compose zatrzymał workera, przyjął trwałe zadanie przez API, na
 uruchomił workera i potwierdził: analiza → pomysły → create-video 202 → automatyczny
 scenariusz → Director → zadanie audio → Asset w S3. Replay zachował to samo zadanie.
 Bez płatnych wywołań. Izolowany stos ai-slop-workers-check jest usuwany po testach.
-Pozostajemy na etapie 14; renderer i kontrola jakości nie zostały zaimplementowane.
+Powyższe podsumowanie opisuje zamknięcie etapu 14. Renderer został dodany w etapie 15 poniżej;
+kontrola jakości pozostaje na etap 16.
+
+## Etap 15 — Render Engine
+
+Renderer jest oddzielony od adapterów generatywnych: przyjmuje pliki wizualne,
+narrację, długości scen, ruchy obrazu, napisy i opcjonalną muzykę. FFmpeg tworzy
+MP4 1080×1920/H.264/AAC/30 fps, a `RenderService` wiąże go z domeną filmu.
+Pydantic waliduje manifest i wejścia renderera. W SQLModel używamy istniejących
+Task/Asset/Video, bez dodatkowego równoległego modelu zadań renderowania.
+Migracja `0013` rozszerza CHECK `task_kind` o `render`.
+
+Task zapisuje manifest pod blokadą Video. Kolejne zadanie nie może przejąć filmu
+w stanie RENDERING. Blokada advisory Task obejmuje całe wykonanie; lokalne FFmpeg
+można powtórzyć po utracie procesu. Film, końcowy Asset i subtitle są zatwierdzane
+atomowo, a wynik Task można odtworzyć po awarii pomiędzy commitami.
+Manifest wskazuje konkretne assety oraz kopię danych scen, więc kolejne generowanie
+nie zmienia wejść wznowionego renderu. Po sukcesie film czeka w QUALITY_CHECK.
+
+StorageProvider ma teraz download do prywatnego strumienia z limitem rozmiaru.
+Render sprawdza bucket/backend, właściciela, film, scenę, rozmiar i SHA-256.
+Pliki trafiają do TemporaryDirectory; FFmpeg nie otrzymuje URL od użytkownika.
+Asset download wymaga JWT i sprawdzenia właściciela także dla finalnych plików.
+Wyniki Runpoda są materializowane wyłącznie z przydzielonego klucza własnego
+storage. Mock zapisuje prawdziwe, techniczne PNG/MP4. Szczegółowy kontrakt,
+limity i obsługa błędów są w sekcji etapu 15 w README.
+
+Testy obejmują rzeczywisty FFmpeg, wszystkie ruchy, napisy, miks audio,
+parametry wyjścia, prywatny download, brak assetów, odzyskanie wyniku oraz
+odrzucenie obcych kluczy i URL. Etap 16 (Quality Control) nie został rozpoczęty.
+
+Weryfikacja 2026-09-28: test Compose z osobnymi PostgreSQL/Redis/SeaweedFS przeszedł
+cały przepływ HTTP → outbox → dispatcher → worker → storage → download. Pięć scen
+STORY dało MP4 44,952 s / 309105 bajtów; ffprobe potwierdził 1080×1920, H.264,
+AAC i 30 fps, a wynik zadania wskazywał QUALITY_CHECK. Użyto wyłącznie mocków
+zewnętrznych providerów; sam FFmpeg, broker i storage były rzeczywiste.
+Końcowa walidacja: 283 testy passed (33 istniejące ostrzeżenia zależności),
+Ruff check/format oraz git diff --check bez błędów. GitHub Actions instaluje
+FFmpeg i fonty, aby te same testy renderu działały na PR i push.

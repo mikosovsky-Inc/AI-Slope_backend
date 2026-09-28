@@ -10,9 +10,11 @@ from sqlmodel import Session, select
 from app.core.config import get_settings
 from app.models.user import User
 from app.modules.audio.service import AudioConflict
+from app.modules.render.engine import RenderError
 from app.modules.tasks.models import Task, TaskKind, TaskStatus
 from app.modules.tasks.service import enqueue
 from app.shared.generation import GenerationSubmissionUnknown, GenerationUnavailable
+from app.shared.storage import StorageError
 from app.shared.tts import TTSOutcomeUnknown
 from app.workers.operations import PollLater, ReviewRequired, execute_operation, recover_result
 
@@ -85,7 +87,7 @@ def run_task(engine, task_id: str, *, settings=None) -> None:
                 else:
                     if (
                         recovering
-                        and task.kind not in (TaskKind.AUDIO, TaskKind.DIRECT)
+                        and task.kind not in (TaskKind.AUDIO, TaskKind.DIRECT, TaskKind.RENDER)
                         and not task.checkpoint.get("provider_job")
                     ):
                         raise ReviewRequired
@@ -131,6 +133,14 @@ def run_task(engine, task_id: str, *, settings=None) -> None:
                         task.status = TaskStatus.QUEUED
                         task.available_at = datetime.now(UTC) + timedelta(seconds=5)
                 elif (
+                    task.kind == TaskKind.RENDER
+                    and task.checkpoint.get("render_manifest")
+                    and isinstance(exc, (RenderError, StorageError, OSError))
+                    and task.attempts < task.max_attempts
+                ):
+                    task.status = TaskStatus.QUEUED
+                    task.available_at = datetime.now(UTC) + timedelta(seconds=2**task.attempts)
+                elif (
                     isinstance(exc, GenerationUnavailable)
                     and task.checkpoint.get("provider_job")
                     and task.attempts < task.max_attempts
@@ -139,7 +149,10 @@ def run_task(engine, task_id: str, *, settings=None) -> None:
                     task.status = TaskStatus.QUEUED
                     task.available_at = datetime.now(UTC) + timedelta(seconds=2**task.attempts)
                 else:
-                    uncertain = isinstance(
+                    uncertain = (
+                        task.kind == TaskKind.RENDER
+                        and bool(task.checkpoint.get("render_manifest"))
+                    ) or isinstance(
                         exc,
                         (
                             ReviewRequired,
