@@ -118,6 +118,9 @@ class Scene(Base, table=True):
     __tablename__ = "scenes"
     __table_args__ = (
         UniqueConstraint("script_id", "position", name="uq_scenes_script_position"),
+        UniqueConstraint("script_id", "generation_priority", name="uq_scene_generation_priority"),
+        CheckConstraint("importance >= 0 AND importance <= 1", name="ck_scene_importance"),
+        CheckConstraint("generation_priority >= 1", name="ck_scene_priority"),
         CheckConstraint("position >= 1", name="ck_scenes_position"),
         CheckConstraint("duration > 0 AND duration <= 180", name="ck_scenes_duration"),
     )
@@ -128,6 +131,9 @@ class Scene(Base, table=True):
     narration: str = Field(max_length=4000)
     visual_prompt: str = Field(max_length=4000)
     visual_type: VisualType = Field(sa_type=enum_type(VisualType, "scene_visual_type"))
+    visual_style: str = Field(default="", max_length=2000)
+    importance: float | None = None
+    generation_priority: int | None = None
     camera_motion: str = Field(max_length=100)
     mood: str = Field(max_length=200)
     caption_emphasis: list[str] = Field(default_factory=list, sa_type=JSON)

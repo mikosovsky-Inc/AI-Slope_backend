@@ -1,3 +1,4 @@
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -26,6 +27,15 @@ class Settings(BaseSettings):
     openai_model: str = ""
     openai_timeout_seconds: float = Field(default=30, gt=0, le=120)
     openai_max_retries: int = Field(default=2, ge=0, le=3)
+    director_image_estimate_usd: Decimal = Field(
+        default=Decimal("0.005"), gt=0, le=100, max_digits=12, decimal_places=6
+    )
+    director_video_second_estimate_usd: Decimal = Field(
+        default=Decimal("0.01"), gt=0, le=100, max_digits=12, decimal_places=6
+    )
+    director_visual_budget_fraction: Decimal = Field(
+        default=Decimal("0.5"), gt=0, le=1, decimal_places=4
+    )
     jwt_secret_key: SecretStr
     jwt_access_token_minutes: int = Field(default=30, ge=1, le=1440)
     jwt_issuer: str = "ai-slop-backend"

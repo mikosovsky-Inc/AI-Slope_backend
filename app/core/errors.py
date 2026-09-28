@@ -13,6 +13,11 @@ from app.modules.competitors.service import (
     ResearchNotReady,
     ResearchUnavailable,
 )
+from app.modules.director.service import (
+    DirectorBudgetExceeded,
+    DirectorNotReady,
+    DirectorPlanNotFound,
+)
 from app.modules.ideas.service import IdeaConflict, IdeaNotFound, IdeasNotReady
 from app.modules.intelligence.service import AnalysisConflict
 from app.modules.research.provider import ResearchUnavailable as FactResearchUnavailable
@@ -109,7 +114,18 @@ async def fact_research_error(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=status, content={"detail": message})
 
 
+async def director_error(request: Request, exc: Exception) -> JSONResponse:
+    status, message = {
+        DirectorNotReady: (409, "A complete SCRIPT_READY video is required"),
+        DirectorBudgetExceeded: (409, "Visual budget cannot cover the image-only estimate"),
+        DirectorPlanNotFound: (404, "Director plan not found"),
+    }[type(exc)]
+    return JSONResponse(status_code=status, content={"detail": message})
+
+
 def register_error_handlers(app: FastAPI) -> None:
+    for error in (DirectorNotReady, DirectorBudgetExceeded, DirectorPlanNotFound):
+        app.add_exception_handler(error, director_error)
     for error in (InsufficientResearch, ResearchStateConflict, FactResearchUnavailable):
         app.add_exception_handler(error, fact_research_error)
     app.add_exception_handler(ScriptNotFound, script_error)

@@ -92,3 +92,27 @@ def source_documents():
         )
         for i in range(2)
     ]
+
+
+@pytest.fixture
+def story_factory():
+    def create(client):
+        credentials = {"email": "director@example.com", "password": "long-test-password"}
+        client.post("/api/v1/auth/register", json=credentials).raise_for_status()
+        token = client.post("/api/v1/auth/login", json=credentials).json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+        channel = client.post(
+            "/api/v1/channels",
+            headers=headers,
+            json={"idea": "Fictional stories with a twist", "language": "en"},
+        ).json()
+        channel_path = "/api/v1/channels/" + channel["id"]
+        client.post(channel_path + "/analyze", headers=headers).raise_for_status()
+        ideas = client.post(channel_path + "/ideas/generate", headers=headers).json()["items"]
+        idea = next(i for i in ideas if i["format"] == "story")
+        path = "/api/v1/ideas/" + idea["id"]
+        client.post(path + "/approve", headers=headers).raise_for_status()
+        video = client.post(path + "/create-video", headers=headers).json()
+        return headers, "/api/v1/videos/" + video["id"], video["id"], channel_path
+
+    return create

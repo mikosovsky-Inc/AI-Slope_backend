@@ -236,9 +236,8 @@ Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
 
 
-## TODO po etapie 9
+## TODO po etapie 10
 
-- Etap 10: Director i dobór wizualizacji.
 - Etapy 11–16: SeaweedFS, adaptery GPU/TTS, Dramatiq, FFmpeg i kontrola jakości.
 - Etapy 17–20: scheduler, panelowe API, budżety i rozszerzona obserwowalność.
 
@@ -736,3 +735,69 @@ Claim statusu jest trwały przed zewnętrznym wywołaniem; nie trzymamy wtedy bl
 Tak jak STORY, przerwanie procesu może wymagać recovery planowanego w etapie 14.
 Nie ma automatycznego retry FAILED. Migracja `0008` dodaje encje i kaskady; Compose
 wykonuje ją przy starcie. Lokalnie: `uv run --no-active alembic upgrade head`.
+
+## Etap 10 — Director
+
+Po uzyskaniu SCRIPT_READY (STORY lub TOP5):
+
+```sh
+curl --fail-with-body -X POST \
+  "http://localhost:8000/api/v1/videos/$VIDEO_ID/direct" \
+  -H "Authorization: Bearer $TOKEN"
+curl --fail-with-body \
+  "http://localhost:8000/api/v1/videos/$VIDEO_ID/direction" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Oba endpointy wymagają JWT właściciela. Zwracają `200` z DirectorPlan i listą scen.
+POST nie wymaga body. Brak planu daje 404, niewłaściwy status/niepełne sceny lub
+zbyt mały budżet daje 409. Cudzy film daje 404. Ponowienie POST zwraca istniejący
+plan bez ponownego dopisywania stylu do promptów. Nie ma jeszcze replanowania.
+
+DirectorService działa deterministycznie, bez dodatkowego LLM i płatnych wywołań.
+Czyta snapshot ChannelBlueprint zapisany w Video, budget_limit_usd i długości scen:
+
+- `visual_prompt`: istniejący prompt (lub narracja, gdy pusty) ze stylem blueprintu;
+- `visual_style`: opis z blueprintu;
+- `importance`: hook 1.0, zakończenie 0.9, pozostałe 0.4 + 0.4 × udział czasu sceny;
+- `generation_priority`: 1 oznacza pierwszą scenę do generowania, kolejność po importance,
+  a przy remisie po pozycji;
+- `visual_type`: image domyślnie, video dla najważniejszych scen mieszczących się w limicie;
+- `camera_motion`: zoom_in dla obrazu, static dla video (ruch może być już w klipie).
+
+To prosta heurystyka znaczenia scen, nie semantyczna ocena ani prognoza popularności.
+Narracja, czasy, kolejność scen i powiązania faktów TOP5 pozostają zachowane.
+Liczba scen video nie przekroczy floor(liczba_scen × video_scene_ratio) z blueprintu;
+przy małej liczbie scen rzeczywisty udział może być niższy. Domyślne .25 i 5 scen
+dają 1 video / 4 obrazy. Operator może ustawić inny udział w blueprintcie przed
+utworzeniem Video. Późniejsze zmiany kanału nie modyfikują snapshotu filmu.
+
+Planowanie budżetu korzysta z interfejsu VisualCostEstimator i konfigurowalnych
+**przykładowych stawek szacunkowych**, nie aktualnego cennika dostawcy:
+
+| Zmienna .env | Domyślnie | Znaczenie |
+| --- | --- | --- |
+| DIRECTOR_IMAGE_ESTIMATE_USD | 0.005 | szacunek jednego obrazu |
+| DIRECTOR_VIDEO_SECOND_ESTIMATE_USD | 0.01 | szacunek sekundy video |
+| DIRECTOR_VISUAL_BUDGET_FRACTION | 0.5 | część budżetu Video przeznaczona na wizualizacje |
+
+Te same wartości przekazuje Compose. Część wizualna jest zaokrąglana w dół do
+6 miejsc dziesiętnych. Najpierw rezerwujemy szacunkowy koszt samych obrazów.
+Jeśli nie mieści się w części wizualnej, cały plan jest odrzucany (409).
+Następnie w kolejności importance zamieniamy obrazy na video tylko wtedy, gdy
+zmiana kosztu duration × stawka_video - stawka_obrazu mieści się w limicie.
+Gdy droższa scena się nie mieści, sprawdzamy kolejne. Nie optymalizujemy globalnie
+liczby klipów kosztem ich priorytetu. Gdy budżet wystarcza tylko na obrazy,
+plan pozostaje image-only. Plan zapisuje zastosowane stawki i szacunkowy koszt.
+
+Nie jest to rachunek za generowanie, gwarancja kosztu całego filmu ani rezerwacja
+środków u dostawcy. Nie uwzględniamy jeszcze rzeczywistych kosztów LLM/TTS, minimalnej
+długości klipu danego dostawcy i jego zasad rozliczeń. Adapter pricing oraz pełne
+CostEvent/BudgetService będą rozwijane przy integracjach i w etapie 19.
+
+Plan i aktualizacje wszystkich scen zapisują się atomowo pod blokadą Video.
+Błąd wycofuje zmiany i pozwala ponowić planowanie. Status pozostaje SCRIPT_READY:
+nie uruchamiamy jeszcze generowania assetów. Migracja `0009` dodaje DirectorPlan
+oraz pola visual_style, importance, generation_priority do Scene. Dla wcześniejszych
+scen importance/priority pozostają null, dopóki Director nie utworzy planu.
+Compose stosuje migrację przy starcie; lokalnie `uv run --no-active alembic upgrade head`.

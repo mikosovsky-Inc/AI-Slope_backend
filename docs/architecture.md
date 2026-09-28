@@ -373,3 +373,34 @@ z metadanymi. Ruff i formatowanie poprawne. Docker osiągnął healthy; test HTT
 potwierdził 422 i FAILED dla pustego korpusu oraz brak możliwości wygenerowania
 scenariusza bez źródeł. Nie wykonano realnego web search ani płatnych calli.
 Następny etap: Director (10).
+
+## Etap 10 — Director
+
+DirectorService wybiera image/video i aktualizuje prompty, styl, camera_motion,
+importance i generation_priority. Jest deterministyczny; nie korzysta z LLM.
+Heurystyka bazuje na pozycji i czasie sceny, a styl/udział video na snapshotcie
+blueprintu. Oba formaty korzystają z tego samego modelu Scene. Narracja i źródła
+TOP5 nie są modyfikowane. Kolejność produkcji jest oddzielona od kolejności odtwarzania.
+
+VisualCostEstimator oddziela estymację cen od domeny. ConfiguredVisualEstimator
+czyta stawki z pydantic-settings; domyślne wartości są przykładowe, nie cennikiem.
+Budżet wizualny jest częścią budżetu filmu (domyślnie .5), a cap scen video wynika
+wyłącznie z blueprintu. Najpierw image-only baseline, potem upgrade wg importance
+przy zachowaniu cap i budżetu. Nie dopuszczamy do nieskończonych retries/generowań,
+bo ta operacja nie generuje assetów i nie wykonuje żadnych zewnętrznych calli.
+
+Migracja 0009 dodaje DirectorPlan (unikalny video_id, stawki i koszt szacunkowy)
+oraz kolumny scen z ograniczeniami DB. Priorytet jest unikalny w skrypcie, importance
+mieści się w [0,1]. Plan i aktualizacje scen to jedna transakcja blokująca Video.
+Powtórzenie/równoległe wywołanie odczytuje ten sam plan. Status pozostaje SCRIPT_READY.
+Brak planu/niegotowy skrypt/niemożliwy baseline budżetu jest jawnie raportowany.
+Kolejny etap doda assety i joby, dopiero potem realne generowanie.
+
+### Weryfikacja etapu 10 — 2026-09-28
+
+172 testy przeszły bez pominięć z PostgreSQL i Redis (9 nowych). Sprawdzono
+konfigurowalny udział video, ograniczenie budżetu, wariant image-only, snapshot
+blueprintu, auth/ownership, replay, zachowanie narracji/cytowań TOP5, konkurencję,
+rollback, kaskady i zgodność migracji. Ruff i formatowanie poprawne.
+Test HTTP kontenera: kanał → STORY → script → Director → budget → odczyt/replay.
+Bez płatnych wywołań i generowania mediów. Następny etap: Asset Domain (11).
