@@ -3,7 +3,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, PostgresDsn, RedisDsn, SecretStr, field_validator
+from pydantic import Field, PostgresDsn, RedisDsn, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -40,11 +40,48 @@ class Settings(BaseSettings):
     jwt_access_token_minutes: int = Field(default=30, ge=1, le=1440)
     jwt_issuer: str = "ai-slop-backend"
     jwt_audience: str = "ai-slop-api"
+    storage_backend: Literal["local", "s3"] = "local"
+    storage_local_root: Path = Path(__file__).resolve().parents[2] / "data" / "assets"
+    storage_max_bytes: int = Field(default=100 * 1024 * 1024, ge=1, le=1024 * 1024 * 1024)
+    s3_public_endpoint_url: str | None = None
+    s3_url_seconds: int = Field(default=300, ge=1, le=3600)
+    s3_timeout_seconds: int = Field(default=10, ge=1, le=60)
     s3_endpoint_url: str = "http://localhost:8333"
     s3_bucket: str = "ai-slop"
     s3_region: str = "us-east-1"
     s3_access_key_id: SecretStr | None = None
     s3_secret_access_key: SecretStr | None = None
+
+    @model_validator(mode="after")
+    def validate_storage(self) -> "Settings":
+        if self.storage_backend == "s3" and (
+            not self.s3_access_key_id
+            or not self.s3_access_key_id.get_secret_value()
+            or not self.s3_secret_access_key
+            or not self.s3_secret_access_key.get_secret_value()
+        ):
+            raise ValueError("S3 storage requires access and secret keys")
+        return self
+
+    @field_validator("s3_endpoint_url", "s3_public_endpoint_url")
+    @classmethod
+    def validate_s3_endpoint(cls, value: str | None) -> str | None:
+        from urllib.parse import urlsplit
+
+        if value is None:
+            return value
+        url = urlsplit(value)
+        if (
+            url.scheme not in ("http", "https")
+            or not url.hostname
+            or url.username
+            or url.password
+            or url.query
+            or url.fragment
+            or url.path not in ("", "/")
+        ):
+            raise ValueError("S3 endpoint must be an HTTP(S) origin without credentials")
+        return value.rstrip("/")
 
     @field_validator("database_url")
     @classmethod

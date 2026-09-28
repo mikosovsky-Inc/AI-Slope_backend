@@ -1,4 +1,5 @@
 from app.models.user import User
+from app.modules.assets.models import Asset, GenerationJob
 from app.modules.channels.models import Channel, ChannelBlueprint, ContentPillar
 from app.modules.competitors.models import Competitor, CompetitorContent
 from app.modules.director.models import DirectorPlan
@@ -7,6 +8,8 @@ from app.modules.research.models import ResearchDocument, ResearchFact, SceneRes
 from app.modules.videos.models import Scene, Video, VideoScript, VideoStatusEvent
 
 __all__ = [
+    "Asset",
+    "GenerationJob",
     "DirectorPlan",
     "ResearchDocument",
     "ResearchFact",

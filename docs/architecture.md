@@ -404,3 +404,48 @@ blueprintu, auth/ownership, replay, zachowanie narracji/cytowań TOP5, konkurenc
 rollback, kaskady i zgodność migracji. Ruff i formatowanie poprawne.
 Test HTTP kontenera: kanał → STORY → script → Director → budget → odczyt/replay.
 Bez płatnych wywołań i generowania mediów. Następny etap: Asset Domain (11).
+
+## Etap 11 — Asset Domain
+
+Modele SQLModel Asset i GenerationJob oraz migracja 0010 przechowują wyłącznie
+metadane. Asset wskazuje film, opcjonalną scenę i job; zawiera typ, lokalizację,
+rozmiar i SHA-256. GenerationJob ma jawny enum statusów, parametry JSON, czasy,
+retry_count oraz error przeznaczony na bezpieczny komunikat. Unikalny klucz
+idempotencji w scenie i jeden Asset na job są podstawą przyszłych ponowień.
+Ograniczenia DB pilnują poprawności statusów, czasów, rozmiaru i lokalizacji.
+
+StorageProvider oddziela domenę od systemu plików i boto3. LocalStorageProvider
+zapisuje atomowo w prywatnym katalogu i zwraca wewnętrzne file URI. S3StorageProvider
+obsługuje SeaweedFS i prywatne buckety S3, podpisuje download URL z ograniczonym TTL,
+stosuje path-style, timeouty i maksymalnie trzy próby SDK ze standardowym backoff.
+Oba adaptery liczą SHA-256, ograniczają rozmiar strumienia i odrzucają niebezpieczne
+klucze. Zapis pod istniejącym kluczem zastępuje obiekt; delete jest idempotentne.
+S3 spool trafia na dysk po 1 MiB, a lokalny zapis używa pliku tymczasowego.
+
+Konfiguracja i sekrety pochodzą z pydantic-settings. Lokalny storage jest domyślny
+poza Compose; Compose dodaje SeaweedFS 4.47 mini, bucket i trwały volume.
+Wewnętrzny endpoint służy operacjom SDK, publiczny endpoint podpisywaniu URL.
+API tworzy adapter w lifespan i zamyka klientów SDK przy shutdown.
+Nie ma nowych endpointów HTTP ani publicznego mounta plików. /ready nadal sprawdza
+PostgreSQL i Redis; nie stanowi testu dostępności storage. Faktyczne operacje
+storage są weryfikowane osobnym testem integracyjnym.
+
+Etap dostarcza modele i storage; wykonanie jobów zacznie się przy adapterach
+generowania i workerach. Przyszła usługa musi sprawdzić ownership oraz zgodność
+film–scena–job, stosować stabilne klucze i obsłużyć kompensację po błędzie DB.
+Nie istnieje transakcja obejmująca jednocześnie storage i PostgreSQL. Usunięcie
+metadanych przez kaskadę nie usuwa obiektów; do workflow trzeba podłączyć sprzątanie
+osieroconych plików. Same ograniczenia unikalności nie zastępują recovery workera.
+
+### Weryfikacja etapu 11 — 2026-09-28
+
+192 testy przeszły bez pominięć z PostgreSQL, Redis i SeaweedFS (20 nowych).
+Sprawdzono roundtrip i podmianę pliku, SHA-256, limity rozmiaru, puste pliki,
+path traversal, symlinki, sprzątanie plików tymczasowych, błędy SDK, parametry
+podpisanych URL, prywatność bucketa, idempotentne delete, ograniczenia jobów,
+unikalność wyników i kaskady. Istniejące testy migracji potwierdzają zgodność
+z metadanymi i downgrade/upgrade. Ruff i formatowanie poprawne.
+Docker uruchomił API jako healthy; kontrola HTTP potwierdziła health/ready/docs,
+a kontrola z kontenera zapis, odczyt i usuwanie obiektu oraz publiczny host podpisu.
+GitHub Actions otrzymał SeaweedFS i test integracyjny S3. Testowy stos jest izolowany
+od danych użytkownika. Następny etap: Runpod Interface (12).

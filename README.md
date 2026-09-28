@@ -236,9 +236,10 @@ Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
 
 
-## TODO po etapie 10
+## TODO po etapie 11
 
-- Etapy 11–16: SeaweedFS, adaptery GPU/TTS, Dramatiq, FFmpeg i kontrola jakości.
+- Etap 12: ImageGenerationProvider, VideoGenerationProvider i adapter Runpod (mock/live).
+- Etapy 13–16: TTS, Dramatiq, FFmpeg i kontrola jakości.
 - Etapy 17–20: scheduler, panelowe API, budżety i rozszerzona obserwowalność.
 
 Na tym etapie nie ma workerów ani schedulera do uruchomienia, pełnego video
@@ -801,3 +802,126 @@ nie uruchamiamy jeszcze generowania assetów. Migracja `0009` dodaje DirectorPla
 oraz pola visual_style, importance, generation_priority do Scene. Dla wcześniejszych
 scen importance/priority pozostają null, dopóki Director nie utworzy planu.
 Compose stosuje migrację przy starcie; lokalnie `uv run --no-active alembic upgrade head`.
+
+## Etap 11 — Asset Domain i storage
+
+Migracja `0010` dodaje modele SQLModel:
+
+- `Asset`: typ `image`, `video`, `audio`, `subtitle`, `final_video`; film,
+  opcjonalna scena i zadanie, backend/bucket/klucz obiektu, MIME, rozmiar,
+  SHA-256, metadane JSON i czas utworzenia. Plik nie trafia do PostgreSQL.
+- `GenerationJob`: scena, provider, typ, parametry JSON, status
+  `pending/running/succeeded/failed`, licznik ponowień, bezpieczny opis błędu,
+  czas rozpoczęcia/zakończenia i klucz idempotencji.
+
+Klucz idempotencji jest unikalny w scenie. Jedno zadanie może mieć jeden wynik
+Asset; ponowienie powinno użyć tego samego zadania i klucza obiektu. Osobna
+regeneracja otrzyma nowy klucz idempotencji. DB sprawdza statusy, czasy zadań,
+nieujemne retry_count, dodatni rozmiar i unikalną lokalizację obiektu.
+
+`StorageProvider` w `app/shared/storage.py` ma `put()`, `get_url()`, `delete()`
+i `close()`. Implementacje znajdują się w `app/integrations/storage/`.
+`put()` przyjmuje binarny strumień od jego bieżącej pozycji i zwraca model Pydantic
+`StoredObject` z rozmiarem i SHA-256. Ponowny zapis tego samego klucza zastępuje
+obiekt; `delete()` jest idempotentne. Maksymalny rozmiar to domyślnie 100 MiB.
+Puste pliki i niepoprawne klucze są odrzucane.
+
+### Wybór storage
+
+| Zmienna | Domyślnie / znaczenie |
+| --- | --- |
+| `STORAGE_BACKEND` | `local` poza Compose; Compose ustawia `s3` |
+| `STORAGE_LOCAL_ROOT` | `AI-Slop_backend/data/assets`, prywatny katalog |
+| `STORAGE_MAX_BYTES` | `104857600` |
+| `S3_ENDPOINT_URL` | lokalnie `http://localhost:8333`, w Compose `http://seaweedfs:8333` |
+| `S3_PUBLIC_ENDPOINT_URL` | adres do podpisanych URL; poza Compose domyślnie taki jak endpoint |
+| `S3_BUCKET` | `ai-slop` |
+| `S3_REGION` | `us-east-1` |
+| `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | sekrety przez pydantic-settings; wymagane dla S3 |
+| `S3_URL_SECONDS` | 300, maksymalnie 3600 |
+| `S3_TIMEOUT_SECONDS` | 10 na połączenie i odczyt; maks. 3 próby SDK |
+| `S3_PORT` | 8333, port hosta dla Compose |
+
+Uruchomienie z SeaweedFS:
+
+```sh
+docker compose up -d --build
+```
+
+Compose uruchamia SeaweedFS 4.47 w trybie `mini`, tworzy bucket i przechowuje
+obiekty w volume `seaweedfs_data`. Port S3 jest wystawiony tylko na localhost.
+Domyślne poświadczenia deweloperskie są w `.env.example`; przy wdrożeniu ustaw
+własne. Poświadczenia SeaweedFS inicjalizują się przy pierwszym uruchomieniu;
+zmiana `.env` nie zastępuje automatycznie konfiguracji istniejącego volume.
+Zewnętrzny bucket S3 trzeba przygotować przed użyciem — adapter nie tworzy go
+ani nie zmienia jego uprawnień.
+[Dokumentacja SeaweedFS mini](https://github.com/seaweedfs/seaweedfs/wiki/Quick-Start-with-weed-mini).
+
+Lokalnie bez Dockera storage działa na plikach. Zastosuj migrację:
+
+```sh
+uv run --no-active alembic upgrade head
+```
+
+Przykład wewnętrznego użycia (nie endpoint HTTP):
+
+```python
+from io import BytesIO
+from uuid import uuid4
+
+from app.core.config import get_settings
+from app.integrations.storage.factory import create_storage_provider
+
+storage = create_storage_provider(get_settings())
+try:
+    key = f"demo/{uuid4()}/example.txt"
+    result = storage.put(key, BytesIO(b"example"), content_type="text/plain")
+    location = storage.get_url(result.key)
+    storage.delete(result.key)
+finally:
+    storage.close()
+```
+
+FastAPI udostępnia adapter wewnętrznym usługom przez `app.state.storage` i zamyka
+go przy zatrzymaniu. Wariant lokalny zwraca `file://` dla procesu backendu,
+nie publiczny URL dla przeglądarki. Nie montujemy katalogu jako static files.
+Zapis lokalny używa pliku tymczasowego i atomowej podmiany; odrzuca `..`, ścieżki
+absolutne i symlinki. Katalog musi być zapisywalny wyłącznie przez zaufany proces.
+
+S3 zwraca podpisany URL ważny przez `S3_URL_SECONDS`. Każdy posiadacz tego URL
+może pobrać obiekt do wygaśnięcia, dlatego nie zapisujemy URL w DB ani logach.
+Podpis powstaje od razu z publicznym adresem; nie wolno później podmieniać hosta.
+Adapter używa SigV4, path-style i ograniczonych retries SDK.
+[Dokumentacja podpisanych URL](https://docs.aws.amazon.com/boto3/latest/reference/services/s3/client/generate_presigned_url.html).
+
+### Zakres i dalsza integracja
+
+Ten etap dostarcza modele oraz adaptery; nie dodaje jeszcze endpointów uploadu,
+generowania mediów ani wykonawcy GenerationJob. Istniejące zasady JWT pozostają
+w użyciu, a żaden nowy publiczny endpoint nie udostępnia plików. Przyszła usługa
+musi sprawdzić właściciela filmu oraz zgodność sceny/zadania z filmem przed
+utworzeniem Asset lub wydaniem URL. Tych relacji nie należy przyjmować z klienta
+bez walidacji. Parametry joba nie mogą zawierać sekretów, a error surowych odpowiedzi SDK.
+
+Zapis obiektu i transakcja PostgreSQL nie są jedną transakcją. Integracja generowania
+musi używać stabilnego klucza obiektu i obsłużyć rollback/recovery. Kaskadowe
+usunięcie metadanych filmu nie usuwa plików z bucketa; sprzątanie osieroconych
+obiektów zostanie podłączone wraz z workflow. Sam model joba nie wykonuje retries
+ani nie wznawia pracy po restarcie — to zadania przyszłych workerów.
+
+### Testy storage
+
+`uv run --no-active pytest` uruchamia testy lokalne i testy SDK bez sieci.
+Testy integracyjne wymagają dodatkowo `TEST_DATABASE_URL`, `TEST_REDIS_URL` oraz:
+
+```sh
+export TEST_S3_ENDPOINT_URL=http://localhost:8333
+export TEST_S3_BUCKET=ai-slop
+export TEST_S3_ACCESS_KEY_ID=ai-slop-local
+export TEST_S3_SECRET_ACCESS_KEY=ai-slop-local-secret
+uv run --no-active pytest -ra
+```
+
+Używaj środowiska testowego. Test S3 zapisuje i usuwa wyłącznie losowy własny klucz
+`integration/<uuid>/image.png`. GitHub Actions uruchamia własny SeaweedFS obok
+PostgreSQL i Redis, dzięki czemu ten test jest wykonywany przy push i PR.

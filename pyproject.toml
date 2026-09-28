@@ -18,6 +18,7 @@ dependencies = [
     "redis>=6,<8",
     "httpx>=0.27,<1",
     "openai>=2,<3",
+    "boto3>=1.40,<2",
 ]
 
 [dependency-groups]
