@@ -1,7 +1,10 @@
 services:
   api:
     build: .
-    environment:
+    environment: &backend_environment
+      TASKS_EAGER: "false"
+      TASK_DISPATCH_INTERVAL_SECONDS: ${TASK_DISPATCH_INTERVAL_SECONDS:-2}
+      TASK_LEASE_SECONDS: ${TASK_LEASE_SECONDS:-300}
       DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:?Set POSTGRES_USER}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?Set POSTGRES_DB}}
       REDIS_URL: redis://redis:6379/0
       STORAGE_BACKEND: s3
@@ -63,6 +66,30 @@ services:
       retries: 3
       start_period: 20s
     init: true
+    stop_grace_period: 20s
+
+  worker:
+    build: .
+    entrypoint: []
+    command: ["dramatiq", "app.workers.actors", "--processes", "1", "--threads", "4"]
+    environment: *backend_environment
+    depends_on:
+      api:
+        condition: service_healthy
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 130s
+
+  dispatcher:
+    build: .
+    entrypoint: []
+    command: ["python", "-m", "app.workers.dispatcher"]
+    environment: *backend_environment
+    depends_on:
+      api:
+        condition: service_healthy
+    init: true
+    restart: unless-stopped
     stop_grace_period: 20s
 
   postgres:

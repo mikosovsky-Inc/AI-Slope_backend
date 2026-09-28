@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     redis_url: RedisDsn = "redis://localhost:6379/0"
     redis_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    tasks_eager: bool = False  # Test harness only: retain direct service assertions.
+    task_dispatch_interval_seconds: float = Field(default=2, ge=0.1, le=60)
+    task_lease_seconds: int = Field(default=300, ge=30, le=3600)
     external_providers_mode: Literal["mock", "live"] = "mock"
     elevenlabs_api_key: SecretStr | None = None
     elevenlabs_model: str = Field(default="", max_length=200)

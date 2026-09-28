@@ -1,0 +1,142 @@
+from contextlib import ExitStack
+
+from sqlmodel import Session, select
+
+from app.core.config import Settings
+from app.integrations.elevenlabs.factory import create_tts_provider
+from app.integrations.llm.factory import create_llm_provider
+from app.integrations.runpod.factory import create_generation_provider
+from app.integrations.storage.factory import create_storage_provider
+from app.modules.audio.service import generate_scene_audio
+from app.modules.competitors.dependencies import get_competitor_research_provider
+from app.modules.competitors.service import research_competitors
+from app.modules.director.dependencies import get_director
+from app.modules.ideas.service import generate_ideas
+from app.modules.intelligence.service import analyze_channel
+from app.modules.research.provider import get_research_provider
+from app.modules.research.service import generate_top5, run_research
+from app.modules.scripts.service import generate_script, owned_video
+from app.modules.tasks.models import Task, TaskKind
+from app.modules.videos.models import Scene, VideoScript
+from app.shared.generation import (
+    GenerationJobRef,
+    ImageGenerationRequest,
+    ProviderJobStatus,
+    VideoGenerationRequest,
+)
+
+
+class PollLater(Exception):
+    pass
+
+
+class ReviewRequired(Exception):
+    pass
+
+
+def execute_operation(db: Session, task: Task, settings: Settings) -> dict:
+    def managed(stack, factory):
+        provider = factory(settings)
+        stack.callback(provider.close)
+        return provider
+
+    with ExitStack() as stack:
+        kind = task.kind
+        args = (db, task.owner_id, task.video_id)
+        if kind in (
+            TaskKind.ANALYZE,
+            TaskKind.IDEAS,
+            TaskKind.STORY,
+            TaskKind.RESEARCH,
+            TaskKind.TOP5,
+        ):
+            llm = managed(stack, create_llm_provider)
+        if kind == TaskKind.ANALYZE:
+            result = analyze_channel(db, task.owner_id, task.channel_id, llm)
+        elif kind == TaskKind.IDEAS:
+            result = generate_ideas(
+                db, task.owner_id, task.channel_id, task.parameters.get("count", 10), llm
+            )
+        elif kind == TaskKind.COMPETITORS:
+            result = research_competitors(
+                db, task.owner_id, task.channel_id, get_competitor_research_provider()
+            )
+        elif kind == TaskKind.STORY:
+            result = generate_script(*args, llm)
+        elif kind == TaskKind.RESEARCH:
+            result = run_research(*args, llm, get_research_provider())
+        elif kind == TaskKind.TOP5:
+            result = generate_top5(*args, llm)
+        elif kind == TaskKind.DIRECT:
+            result = get_director(settings).direct(*args)
+        elif kind == TaskKind.AUDIO:
+            result = generate_scene_audio(
+                *args,
+                task.scene_id,
+                managed(stack, create_tts_provider),
+                managed(stack, create_storage_provider),
+                settings,
+            )
+        elif kind in (TaskKind.IMAGE, TaskKind.VIDEO):
+            return visual(db, task, managed(stack, create_generation_provider), settings)
+        else:
+            raise ValueError("Unsupported task kind")
+        return result.model_dump(mode="json")
+
+
+def visual(db: Session, task: Task, provider, settings: Settings) -> dict:
+    owned_video(db, task.owner_id, task.video_id)
+    scene = db.exec(
+        select(Scene)
+        .join(VideoScript)
+        .where(
+            Scene.id == task.scene_id,
+            VideoScript.video_id == task.video_id,
+        )
+    ).one()
+    data = {"request_id": str(task.id), "prompt": scene.visual_prompt}
+    reference = task.checkpoint.get("provider_job")
+    if reference:
+        result = provider.get_status(GenerationJobRef.model_validate(reference))
+    else:
+        if task.checkpoint.get("submit_started"):
+            raise ReviewRequired
+        task.checkpoint = task.checkpoint | {"submit_started": True}
+        db.add(task)
+        db.commit()
+        result = (
+            provider.generate_image(ImageGenerationRequest(**data))
+            if task.kind == TaskKind.IMAGE
+            else provider.generate_video(
+                VideoGenerationRequest(**data, duration_seconds=float(scene.duration))
+            )
+        )
+        task.checkpoint = task.checkpoint | {"provider_job": result.job.model_dump(mode="json")}
+        db.add(task)
+        db.commit()
+        if settings.external_providers_mode == "mock":
+            result = provider.get_status(result.job)
+            result = provider.get_status(result.job)
+    if result.status in (ProviderJobStatus.QUEUED, ProviderJobStatus.RUNNING):
+        raise PollLater
+    if result.status != ProviderJobStatus.SUCCEEDED:
+        raise ValueError("Provider generation failed")
+    return result.model_dump(mode="json")
+
+
+def recover_result(db: Session, task: Task) -> dict | None:
+    """Recover committed domain results without repeating an uncertain external call."""
+    from app.modules.scripts.service import get_script
+    from app.modules.videos.models import Video, VideoStatus
+
+    if task.kind in (TaskKind.STORY, TaskKind.TOP5):
+        script = db.exec(select(VideoScript).where(VideoScript.video_id == task.video_id)).first()
+        if script:
+            return get_script(db, task.owner_id, task.video_id).model_dump(mode="json")
+    if task.kind == TaskKind.RESEARCH:
+        video = db.get(Video, task.video_id)
+        if video and video.status == VideoStatus.RESEARCHED:
+            from app.modules.research.service import read_research
+
+            return read_research(db, task.owner_id, task.video_id).model_dump(mode="json")
+    return None

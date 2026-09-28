@@ -15,6 +15,7 @@ from main import app
 def settings():
     return Settings(
         _env_file=None,
+        tasks_eager=True,
         database_url="postgresql+psycopg://test:test@localhost/test",
         jwt_secret_key="test-secret-" + "x" * 48,
     )

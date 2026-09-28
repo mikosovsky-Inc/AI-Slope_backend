@@ -550,3 +550,71 @@ Końcowy test kontenera potwierdził HTTP /health, /ready i /docs oraz przepływ
 rejestracja → kanał → STORY → scena → mock TTS → WAV w SeaweedFS → CostEvent.
 Ponowne wywołanie zwróciło ten sam Asset. Weryfikacja używała wyłącznie izolowanego
 stosu ai-slop-tts-check, usuwanego po testach.
+
+## Etap 14 — Async Workers
+
+Wybrano Dramatiq 2.2 z Redis, ponieważ pasuje do istniejącego stosu i prostego
+modelu workerów w monolicie. Kolejki content/research/image/video/audio/render/quality
+są deklarowane jawnie. Render i quality są zarezerwowane dla następnych etapów.
+API nie wykonuje operacji providerów w requestach w domyślnym trybie. Historyczne
+bezpośrednie wywołania usług pozostają tylko w trybie TASKS_EAGER testów regresyjnych;
+Compose wymusza false. Oddzielne testy weryfikują rzeczywisty kontrakt asynchroniczny.
+
+Migracja 0012 dodaje SQLModel Task: właściciel, target, rodzaj, parametry, status,
+wynik, checkpoint, attempts/max_attempts, run_token i czasy dostarczania/wykonania.
+Task jest trwałym outboxem. API zapisuje zadanie i zwraca 202; dispatcher wysyła
+jego UUID do Redis poza requestem. Awaria pomiędzy enqueue i commitem dispatchera
+może duplikować wiadomość, ale nie gubi zadania. Oczekujące zadania są ponownie
+wysyłane po okresie redelivery, także po utracie danych Redis. delivery_after
+jest osobne od available_at, żeby samo wysłanie nie przesuwało terminu wykonania.
+
+POST create-video zapisuje film, IDEA_GENERATED, zużycie pomysłu i pierwszy task
+w tej samej transakcji. STORY uruchamia scenariusz i Directora; TOP5 research,
+scenariusz ze źródeł i Directora. Child task powstaje razem z commitem zakończenia
+rodzica. Pusty lokalny research nadal kończy TOP5 bez generowania fikcyjnych faktów.
+Workflow zatrzymuje się na SCRIPT_READY. Audio można zlecić dla sceny; zapisuje
+Asset i CostEvent. Zadania image/video uruchamiają i odpytują Runpod, zachowując
+referencję i wynik JSON. Nie deklarują gotowości wizualnych assetów ani nie
+materializują plików z dowolnych URL; integracja mediów pozostaje przed renderingiem.
+
+Idempotency-Key jest unikalny per user i powiązany z targetem/parametrami. Odmienny
+request pod tym samym kluczem daje 409. API sprawdza własność przed zwróceniem
+istniejącego zadania. GET task i GET video tasks również wymagają JWT właściciela.
+Worker sprawdza aktywność użytkownika. Wiadomość zawiera tylko ID, nie prompt czy sekret.
+
+Advisory lock PostgreSQL na UUID zadania jest trzymany na osobnym połączeniu przez
+całe wykonanie, także pomiędzy commitami usług. Zwolnienie następuje przy zakończeniu
+lub utracie procesu/połączenia. Token wykonania chroni końcowy commit starej próby.
+Zakończone zadania nie są ponawiane; odczyt zapisanego scenariusza/research pozwala
+odzyskać wynik po awarii pomiędzy commitem domeny a zakończeniem taska. Audio korzysta
+z wcześniejszej ochrony GenerationJob. Director jest lokalny i idempotentny.
+
+Runpod zapisuje marker submitu przed wywołaniem i referencję po odpowiedzi. Znana
+referencja umożliwia polling bez kolejnego submitu; błędy odczytu mają ograniczony
+backoff i max_attempts, a polling całkowity deadline. Niepewne efekty LLM/TTS/submitu
+po awarii trafiają do needs_review. Domyślne retries Dramatiq są wyłączone, żeby nie
+omijały tej polityki. Brak jeszcze endpointu ręcznego zatwierdzenia recovery.
+Nie ma gwarancji exactly-once u zewnętrznego dostawcy. Samo wygaśnięcie lease nie
+uruchamia równoległego płatnego calla, jeśli poprzednia próba nadal ma blokadę.
+
+Compose dodaje worker (1 proces, 4 wątki) i dispatcher (interwał domyślnie 2 s).
+Oba używają tej samej konfiguracji co API i startują po jego gotowości. Tylko API
+stosuje migracje. Shutdown workerów ma dłuższy grace period, a klienci providerów
+są zamykani po zadaniu. Dispatcher zatrzymuje się po sygnale. /ready nadal sprawdza
+PostgreSQL i Redis, nie obecność workerów; przy wyłączonym workerze API przyjmuje
+pracę do trwałej kolejki.
+
+### Weryfikacja etapu 14 — 2026-09-28
+
+268 testów przeszło bez pominięć z PostgreSQL, Redis i SeaweedFS (13 nowych).
+Testowano 202 bez wykonywania LLM w requestcie, ownership, idempotency-key,
+atomiczny zapis video/outbox, awarię dispatchu, rzeczywisty worker Redis,
+duplikaty/równoległość, recovery zapisanego skryptu, needs_review, checkpoint Runpod,
+backoff odczytu, nieaktywnego właściciela, zadania audio i wizualne oraz łańcuch
+STORY → Director. Migracja odpowiada metadanym SQLModel. Ruff i formatowanie poprawne.
+
+Test całego Compose zatrzymał workera, przyjął trwałe zadanie przez API, następnie
+uruchomił workera i potwierdził: analiza → pomysły → create-video 202 → automatyczny
+scenariusz → Director → zadanie audio → Asset w S3. Replay zachował to samo zadanie.
+Bez płatnych wywołań. Izolowany stos ai-slop-workers-check jest usuwany po testach.
+Pozostajemy na etapie 14; renderer i kontrola jakości nie zostały zaimplementowane.

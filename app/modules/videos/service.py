@@ -66,7 +66,13 @@ def transition_video(
     return video
 
 
-def create_video(db: Session, owner_id: UUID, idea_id: UUID) -> tuple[VideoRead, bool]:
+def create_video(
+    db: Session, owner_id: UUID, idea_id: UUID, *, enqueue_workflow: bool = False
+) -> tuple[VideoRead, bool]:
+    if enqueue_workflow:
+        from app.models.user import User
+
+        db.exec(select(User).where(User.id == owner_id).with_for_update()).one()
     # Same channel-first lock order as approval/rejection and idea generation.
     idea = db.exec(
         select(ContentIdea)
@@ -127,6 +133,20 @@ def create_video(db: Session, owner_id: UUID, idea_id: UUID) -> tuple[VideoRead,
         db.flush()
         db.refresh(video)
         result = VideoRead.model_validate(video)
+        if enqueue_workflow:
+            from app.modules.tasks.models import TaskKind
+            from app.modules.tasks.service import enqueue
+
+            kind = TaskKind.RESEARCH if video.format.value == "top5" else TaskKind.STORY
+            enqueue(
+                db,
+                owner_id,
+                kind,
+                video_id=video.id,
+                parameters={"workflow": True},
+                key=f"workflow:{video.id}",
+                commit=False,
+            )
         db.commit()
         return result, True
     except Exception:

@@ -6,6 +6,7 @@ from app.api.routes.director import router as director_router
 from app.api.routes.ideas import router as ideas_router
 from app.api.routes.research import router as research_router
 from app.api.routes.scripts import router as scripts_router
+from app.api.routes.tasks import router as tasks_router
 
 router = APIRouter(prefix="/api/v1")
 router.include_router(auth_router)
@@ -19,3 +20,5 @@ router.include_router(scripts_router)
 router.include_router(research_router)
 
 router.include_router(director_router)
+
+router.include_router(tasks_router)

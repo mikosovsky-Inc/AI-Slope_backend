@@ -9,7 +9,13 @@ from uuid import UUID
 from sqlmodel import Session, select
 
 from app.core.config import Settings
-from app.modules.assets.models import Asset, AssetType, GenerationJob, GenerationStatus
+from app.modules.assets.models import (
+    Asset,
+    AssetType,
+    GenerationJob,
+    GenerationStatus,
+    StorageBackend,
+)
 from app.modules.audio.pricing import ConfiguredTTSPricing
 from app.modules.costs.models import CostEvent
 from app.modules.ideas.models import ContentIdea
@@ -148,7 +154,7 @@ def generate_scene_audio(
             scene_id=scene_id,
             generation_job_id=job_id,
             type=AssetType.AUDIO,
-            storage_backend=settings.storage_backend,
+            storage_backend=StorageBackend(settings.storage_backend),
             bucket=settings.s3_bucket if settings.storage_backend == "s3" else "",
             object_key=key,
             content_type=stored.content_type,

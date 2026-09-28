@@ -4,14 +4,16 @@ FastAPI + PostgreSQL, schematy API Pydantic, konfiguracja `pydantic-settings`,
 hasła Argon2id i tokeny dostępu JWT (HS256). Modele bazy i sesje korzystają z SQLModel (opartego na SQLAlchemy i Pydantic),
 a migracje z Alembic. E-maile są zapisywane małymi literami i unikalne.
 
-## Stan projektu — etapy 1 i 2
+## Stan projektu — etapy 1–14
 
-Działający fundament modularnego monolitu: FastAPI, PostgreSQL, SQLModel,
-Alembic, Redis, kontenery, health checks, logi JSON i obsługa błędów.
-Istniejące rejestracja, logowanie JWT i role pozostają dostępne.
-Etap 2 dodaje kanały, blueprint i filary treści. Integracje AI i generowanie
-filmów nie są jeszcze wdrożone.
-Szczegóły: [docs/architecture.md](docs/architecture.md).
+Modularny monolit FastAPI z JWT, PostgreSQL/SQLModel, Redis i SeaweedFS.
+Działa analiza kanału, pomysły, scenariusze STORY/TOP5, Director, adaptery
+Runpod/TTS oraz asynchroniczne zadania Dramatiq. Rendering i quality control
+pozostają na kolejne etapy. Szczegóły: [docs/architecture.md](docs/architecture.md).
+
+**Od etapu 14 operacje generowania zwracają `202` i zadanie, a wynik odbiera się
+przez GET /api/v1/tasks/{id}.** Opisy wcześniejszych etapów dokumentują także
+poprzedni kontrakt synchroniczny; aktualny przepływ jest w sekcji etapu 14.
 
 ## Uruchomienie całego stacka
 
@@ -30,10 +32,11 @@ lokalnej. Następnie:
 docker compose up --build
 ```
 
-Compose uruchamia dokładnie trzy usługi: `api`, `postgres`, `redis`.
+Compose uruchamia `api`, `postgres`, `redis`, `seaweedfs`, `worker` i `dispatcher`.
 API czeka na gotowość obu zależności, wykonuje `alembic upgrade head`,
 następnie startuje Uvicorn. Błąd migracji zatrzymuje start API.
-Dane PostgreSQL i Redis są przechowywane w nazwanych wolumenach.
+Dane PostgreSQL, Redis i SeaweedFS są przechowywane w nazwanych wolumenach.
+Worker i dispatcher startują po API, które jako jedyne stosuje migracje.
 Obraz API uruchamia się jako użytkownik bez uprawnień roota i nie zawiera `.env`.
 
 Uruchomienie w tle i weryfikacja:
@@ -56,7 +59,7 @@ docker compose down
 ```
 
 Powyższe zatrzymuje stack i zachowuje dane. `docker compose down --volumes`
-usuwa też wszystkie dane obu usług — używaj tylko do świadomego resetu środowiska.
+usuwa też dane PostgreSQL, Redis i SeaweedFS — używaj tylko do świadomego resetu środowiska.
 
 ## Uruchomienie API poza Dockerem
 
@@ -91,9 +94,9 @@ Przykłady: [.env.example](.env.example). `.env` jest ignorowany przez Git.
 | `JWT_ISSUER`, `JWT_AUDIENCE` | Wystawca i odbiorca tokenów |
 | `CORS_ALLOWED_ORIGINS` | Tablica JSON dozwolonych adresów frontendu |
 | `LOG_LEVEL` | Poziom logów aplikacji, domyślnie `INFO` |
-| `EXTERNAL_PROVIDERS_MODE` | `mock` (domyślnie) lub `live`; rezerwacja pod integracje późniejszych etapów |
+| `EXTERNAL_PROVIDERS_MODE` | `mock` (domyślnie) lub `live` dla adapterów AI |
 | `API_PORT`, `POSTGRES_PORT`, `REDIS_PORT` | Porty hosta Compose: 8000, 5432, 6379 |
-| `S3_*` | Rezerwacja konfiguracji SeaweedFS pod późniejszy etap storage |
+| `S3_*` | Konfiguracja prywatnego storage S3/SeaweedFS |
 
 Hasła zawierające znaki specjalne URL muszą być zakodowane procentowo w DSN.
 W takim przypadku ustaw jawnie także `DOCKER_DATABASE_URL`. Porty wewnątrz
@@ -236,14 +239,14 @@ Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
 
 
-## TODO po etapie 13
+## TODO po etapie 14
 
-- Etap 14: Dramatiq, kolejki, trwała orkiestracja generowania i recovery.
-- Etapy 15–16: FFmpeg i kontrola jakości.
+- Etap 15: FFmpeg, materializacja wyników wizualnych i składanie finalnego filmu.
+- Etap 16: kontrola jakości.
 - Etapy 17–20: scheduler, panelowe API, budżety i rozszerzona obserwowalność.
 
-Na tym etapie nie ma workerów ani schedulera do uruchomienia, pełnego video
-workflow ani polecenia seed/demo. Adapter OpenAI jest używany przez jawną analizę kanału. Sam start w trybie
+Worker i dispatcher są uruchamiane w Compose. Nie ma jeszcze schedulera, pełnego
+workflow do READY ani polecenia seed/demo. Adapter OpenAI jest używany przez jawną analizę kanału. Sam start w trybie
 `live` nie wykonuje płatnych operacji.
 
 
@@ -1145,3 +1148,118 @@ uv run --no-active alembic upgrade head
 Testy TTS i zapisu audio są w `tests/unit/test_tts.py` oraz
 `tests/integration/test_audio_storage.py`. Testy adaptera live korzystają z
 MockTransport, bez połączeń do ElevenLabs i bez kosztów GPU/TTS.
+
+## Etap 14 — kolejki i workery
+
+Wybrano **Dramatiq + Redis**: wykorzystuje istniejący Redis, ma prosty model actorów
+i wystarcza do modularnego monolitu. PostgreSQL pozostaje źródłem stanu zadania;
+Redis przenosi wyłącznie jego UUID. Kolejki: `content`, `research`, `image`, `video`,
+`audio`, `render`, `quality`. Dwie ostatnie są przygotowane, ale bez implementacji
+renderera i kontroli jakości z etapów 15–16.
+[Zasady dostarczania Dramatiq](https://dramatiq.io/best_practices.html).
+
+### Uruchomienie
+
+```sh
+docker compose up -d --build --wait
+docker compose logs -f worker dispatcher
+```
+
+Poza Dockerem zastosuj migracje i uruchom API, a w osobnych terminalach:
+
+```sh
+uv run --no-active dramatiq app.workers.actors --processes 1 --threads 4
+uv run --no-active python -m app.workers.dispatcher
+```
+
+Wszystkie procesy muszą mieć tę samą bazę, Redis i konfigurację providerów/storage.
+Dla local storage muszą też widzieć ten sam katalog. Compose używa wspólnego S3.
+Migracje wykonuje API, worker i dispatcher nie uruchamiają ich równolegle.
+Dispatcher jest technicznym procesem dostarczania istniejących zadań, nie schedulerem
+publikacji z etapu 17. Zatrzymanie workera nie blokuje przyjmowania nowych zadań.
+
+`TASK_DISPATCH_INTERVAL_SECONDS=2` określa interwał dispatchera.
+`TASK_LEASE_SECONDS=300` określa termin sprawdzenia niedokończonej pracy.
+`TASKS_EAGER=false` jest domyślne i wymuszone w Compose. Tryb eager jest wyłącznie
+narzędziem testów regresyjnych wcześniejszych usług; wykonuje je synchronicznie.
+Nowe testy asynchronicznego API jawnie go wyłączają, a integracja testuje prawdziwy
+Redis i worker Dramatiq. Nie włączaj eager w uruchomionej aplikacji.
+
+### Kontrakt API
+
+Poniższe POST wymagają JWT właściciela i zwracają `202` + TaskRead oraz Location:
+
+- `/channels/{id}/analyze`
+- `/channels/{id}/ideas/generate`
+- `/channels/{id}/competitor-research`
+- `/videos/{id}/research`
+- `/videos/{id}/script/generate`
+- `/videos/{id}/top5-script/generate`
+- `/videos/{id}/direct`
+- `/videos/{id}/audio` z body `{"scene_id":"UUID"}`
+- `/videos/{id}/visuals/image` lub `/visuals/video` z tym samym body
+
+Wszystkie ścieżki mają prefiks `/api/v1`. Przykład:
+
+```sh
+curl --fail-with-body -X POST \
+  "http://localhost:8000/api/v1/channels/$CHANNEL_ID/analyze" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Idempotency-Key: channel-analysis-v1"
+
+curl --fail-with-body "http://localhost:8000/api/v1/tasks/$TASK_ID" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+TaskRead zawiera id, kind, status, video_id, attempts, error, result i czasy.
+Statusy: queued, running, succeeded, failed, needs_review. `result` po sukcesie
+zawiera dotychczasowy wynik operacji. Błędy wykonania są widoczne w zadaniu,
+a nie w odpowiedzi POST, która potwierdza jedynie przyjęcie. Endpoint GET zadania
+oraz `GET /videos/{id}/tasks` (do 100 najnowszych) weryfikują właściciela; cudze
+zasoby dają 404. Nieaktywny użytkownik nie może uruchomić czekającego zadania.
+
+Opcjonalny `Idempotency-Key` jest unikalny w obrębie użytkownika. Taki sam klucz
+i parametry zwracają poprzednie zadanie, zmienione parametry dają 409. Bez nagłówka
+POST tworzy nowe zlecenie, więc przy ponawianiu po błędzie sieci zachowaj klucz.
+To deduplikacja zleceń backendu, nie gwarancja exactly-once płatnego API.
+
+`POST /ideas/{id}/create-video` zwraca `202` z VideoRead. Zapis filmu, zużycie pomysłu
+i pierwsze zadanie są atomowe w PostgreSQL. Status filmu początkowo wynosi
+IDEA_GENERATED; SCRIPTING/RESEARCHING ustawia worker po podjęciu pracy.
+Replay zwraca istniejący film (`200`) bez drugiego workflow.
+
+Automatyczny łańcuch na tym etapie:
+
+- STORY: scenariusz → Director → SCRIPT_READY.
+- TOP5: research → scenariusz z faktów → Director → SCRIPT_READY.
+
+TOP5 nadal wymaga prawdziwego korpusu źródeł; pusty LocalResearchProvider zatrzymuje
+przetwarzanie jako failed, zamiast wymyślać fakty. Nie dodano wyszukiwarki.
+Audio zlecane osobno zapisuje prawdziwy Asset i CostEvent. Zadania wizualne
+uruchamiają adapter Runpod i zapisują referencję oraz JSON wyniku providera;
+nie materializują jeszcze jego plików w Asset. Mock wizualny nadal nie generuje
+PNG/MP4. Nie ustawiamy ASSETS_READY ani READY_TO_RENDER na podstawie samego JSON.
+
+### Dostarczanie, ponowienia i restart
+
+Migracja `0012` dodaje SQLModel Task z parametrami, wynikiem, checkpointem providera,
+czasem kolejnej próby, licznikiem, tokenem wykonania i statusem. Wiersz Task jest
+jednocześnie trwałym outboxem. API nie wysyła do Redis w swojej transakcji.
+Dispatcher cyklicznie wysyła oczekujące UUID; po awarii Redis lub utracie wiadomości
+spróbuje ponownie. Kolejne dostarczenie po 30 sekundach może duplikować wiadomość.
+
+Worker korzysta z blokady advisory PostgreSQL trzymanej przez całe wykonanie,
+także pomiędzy commitami usług. Duplikat nie uruchamia drugiej operacji jednocześnie.
+Zakończone zadanie jest pomijane. Commit wyniku i utworzenie następnego zadania są
+atomowe. Token wykonania chroni zakończenie przez poprzednie wykonanie.
+
+Po restarcie można odzyskać już zapisany scenariusz/research, ponowić lokalnego
+Directora i odczytać gotowy wynik audio. Znane ID Runpod pozwala kontynuować status
+bez ponownego submitu. Status jest odpytywany co co najmniej 5 sekund, z ograniczonym
+terminem całego odpytywania. Chwilowe błędy odczytu mają ograniczony backoff i limit
+prób. Dramatiq nie stosuje dodatkowej warstwy automatycznych retries aktora.
+
+Jeśli proces zginął podczas niejednoznacznego LLM/TTS/submitu Runpod, zadanie trafia
+do needs_review zamiast powtarzać płatną operację. Nie ma jeszcze publicznego
+endpointu zatwierdzania takich ponowień; należy najpierw ustalić wynik u dostawcy.
+Nie obiecujemy atomowej transakcji PostgreSQL–Redis–provider ani exactly-once GPU.

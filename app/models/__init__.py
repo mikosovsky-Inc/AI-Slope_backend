@@ -6,9 +6,11 @@ from app.modules.costs.models import CostEvent
 from app.modules.director.models import DirectorPlan
 from app.modules.ideas.models import ContentIdea
 from app.modules.research.models import ResearchDocument, ResearchFact, SceneResearchFact
+from app.modules.tasks.models import Task
 from app.modules.videos.models import Scene, Video, VideoScript, VideoStatusEvent
 
 __all__ = [
+    "Task",
     "CostEvent",
     "Asset",
     "GenerationJob",
