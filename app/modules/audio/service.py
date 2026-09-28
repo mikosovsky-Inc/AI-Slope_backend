@@ -42,6 +42,7 @@ def generate_scene_audio(
     *,
     voice_id: str | None = None,
     voice_settings: VoiceSettings | None = None,
+    regeneration_id: UUID | None = None,
 ) -> Asset:
     """Internal synchronous service. Owns transactions; future workers call this outside HTTP."""
     job_id = None
@@ -76,6 +77,9 @@ def generate_scene_audio(
                 sort_keys=True,
             ).encode()
         ).hexdigest()
+        # A QC repair is an explicit new generation; replaying the same repair stays idempotent.
+        if regeneration_id is not None:
+            fingerprint = hashlib.sha256(f"{fingerprint}:{regeneration_id}".encode()).hexdigest()
         existing = db.exec(
             select(GenerationJob).where(
                 GenerationJob.scene_id == scene_id,

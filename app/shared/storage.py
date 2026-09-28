@@ -8,6 +8,10 @@ class StorageError(Exception):
     """Safe boundary for filesystem/SDK errors; no provider details in the message."""
 
 
+class StorageObjectMissing(StorageError):
+    """The object is absent, as distinct from a transient storage outage."""
+
+
 class StoredObject(BaseModel):
     key: str
     size_bytes: int = Field(gt=0)

@@ -186,3 +186,33 @@ def test_private_s3_download_closes_body_and_enforces_limit(s3_settings):
             assert body._raw_stream.closed
     finally:
         storage.close()
+
+
+def test_missing_object_is_distinct_from_storage_outage(tmp_path, s3_settings):
+    from app.shared.storage import StorageObjectMissing
+
+    with pytest.raises(StorageObjectMissing):
+        LocalStorageProvider(tmp_path).download("absent", BytesIO())
+    storage = S3StorageProvider(s3_settings)
+    try:
+        with Stubber(storage.client) as stub:
+            stub.add_client_error(
+                "get_object",
+                service_error_code="NoSuchKey",
+                http_status_code=404,
+                expected_params={"Bucket": s3_settings.s3_bucket, "Key": "absent"},
+            )
+            with pytest.raises(StorageObjectMissing):
+                storage.download("absent", BytesIO())
+        with Stubber(storage.client) as stub:
+            stub.add_client_error(
+                "get_object",
+                service_error_code="ServiceUnavailable",
+                http_status_code=503,
+                expected_params={"Bucket": s3_settings.s3_bucket, "Key": "absent"},
+            )
+            with pytest.raises(StorageError) as exc:
+                storage.download("absent", BytesIO())
+            assert not isinstance(exc.value, StorageObjectMissing)
+    finally:
+        storage.close()

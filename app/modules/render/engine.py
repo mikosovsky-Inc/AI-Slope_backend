@@ -13,6 +13,14 @@ class RenderError(Exception):
     """Safe FFmpeg boundary: do not expose command output or local paths."""
 
 
+class MediaUnavailable(RenderError):
+    """Local tool/configuration/deadline failure, not evidence of defective media."""
+
+
+class InvalidMedia(RenderError):
+    """Input cannot be probed as the expected media format."""
+
+
 class RenderScene(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
     visual: Path
@@ -45,7 +53,7 @@ class FFmpegRenderer:
     def timeout(self, maximum: float) -> float:
         remaining = maximum if self.deadline is None else self.deadline - time.monotonic()
         if remaining <= 0:
-            raise RenderError("Render deadline exceeded")
+            raise MediaUnavailable("Render deadline exceeded")
         return min(maximum, remaining)
 
     def run(self, args: list[str], *, cwd: Path | None = None) -> None:
@@ -73,7 +81,9 @@ class FFmpegRenderer:
                 check=True,
                 timeout=self.timeout(self.settings.render_timeout_seconds),
             )
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.TimeoutExpired):
+            raise MediaUnavailable("Media tool unavailable or timed out") from None
+        except subprocess.SubprocessError:
             raise RenderError("Media processing failed") from None
 
     def probe(self, path: Path, mime: str) -> dict:
@@ -88,7 +98,7 @@ class FFmpegRenderer:
                     "-f",
                     DEMUXERS[mime],
                     "-show_entries",
-                    "stream=codec_type,codec_name,width,height,channels,r_frame_rate:"
+                    "stream=codec_type,codec_name,width,height,channels,r_frame_rate,duration:"
                     "format=duration",
                     "-of",
                     "json",
@@ -109,8 +119,10 @@ class FFmpegRenderer:
                 ):
                     raise ValueError("Unsupported media dimensions")
             return data
-        except (OSError, subprocess.SubprocessError, ValueError, KeyError):
-            raise RenderError("Invalid media input") from None
+        except (OSError, subprocess.TimeoutExpired):
+            raise MediaUnavailable("Media tool unavailable or timed out") from None
+        except (subprocess.SubprocessError, ValueError, KeyError):
+            raise InvalidMedia("Invalid media input") from None
 
     @staticmethod
     def motion_filter(motion: str, frames: int) -> str:

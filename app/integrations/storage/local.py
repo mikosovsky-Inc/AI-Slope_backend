@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from app.integrations.storage.streams import copy_object
-from app.shared.storage import StorageError, StoredObject, validate_key
+from app.shared.storage import StorageError, StorageObjectMissing, StoredObject, validate_key
 
 
 class LocalStorageProvider:
@@ -55,6 +55,8 @@ class LocalStorageProvider:
                     content_type="application/octet-stream",
                     max_bytes=self.max_bytes,
                 )
+        except FileNotFoundError:
+            raise StorageObjectMissing("Object unavailable") from None
         except OSError:
             raise StorageError("Local storage unavailable") from None
 

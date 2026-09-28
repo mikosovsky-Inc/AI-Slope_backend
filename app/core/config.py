@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     render_timeout_seconds: int = Field(default=600, ge=10, le=1800)
     render_threads: int = Field(default=2, ge=1, le=8)
     render_max_input_bytes: int = Field(default=536870912, ge=1048576, le=2147483648)
+    quality_duration_tolerance_seconds: float = Field(default=1.0, ge=0.05, le=10)
+    quality_max_scene_retries: int = Field(default=2, ge=0, le=5)
+    quality_timeout_seconds: int = Field(default=180, ge=10, le=1800)
+    quality_repair_timeout_seconds: int = Field(default=3600, ge=30, le=86400)
     tasks_eager: bool = False  # Test harness only: retain direct service assertions.
     task_dispatch_interval_seconds: float = Field(default=2, ge=0.1, le=60)
     task_lease_seconds: int = Field(default=300, ge=30, le=3600)

@@ -17,6 +17,10 @@ from app.modules.videos.service import transition_video
 from app.shared.storage import StorageProvider
 
 
+class AssetIntegrityError(RenderError):
+    pass
+
+
 class SceneInput(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
     scene_id: UUID
@@ -50,7 +54,7 @@ def download_asset(storage: StorageProvider, settings: Settings, asset: Asset, p
     with path.open("wb") as target:
         stored = storage.download(asset.object_key, target)
     if stored.sha256 != asset.sha256 or stored.size_bytes != asset.size_bytes:
-        raise RenderError("Asset integrity mismatch")
+        raise AssetIntegrityError("Asset integrity mismatch")
 
 
 def store_asset(db, storage, settings, task, path, kind, mime) -> Asset:
@@ -115,38 +119,43 @@ class RenderService:
             ]
             if video.status not in allowed:
                 raise RenderError("Video is not ready for a new render")
-            scenes = db.exec(
-                select(Scene)
-                .join(VideoScript)
-                .where(VideoScript.video_id == video.id)
-                .order_by(Scene.position)
-            ).all()
-            inputs = []
-            for scene in scenes:
-                assets = db.exec(
-                    select(Asset)
-                    .where(Asset.video_id == video.id, Asset.scene_id == scene.id)
-                    .order_by(Asset.created_at.desc(), Asset.id.desc())
+            if task.parameters.get("input_manifest"):
+                manifest = RenderManifest.model_validate(task.parameters["input_manifest"])
+            else:
+                scenes = db.exec(
+                    select(Scene)
+                    .join(VideoScript)
+                    .where(VideoScript.video_id == video.id)
+                    .order_by(Scene.position)
                 ).all()
-                if scene.visual_type.value not in ("image", "video"):
-                    raise RenderError("Scene requires a supported visual type")
-                visual = next((a for a in assets if a.type.value == scene.visual_type.value), None)
-                audio = next((a for a in assets if a.type == AssetType.AUDIO), None)
-                if visual is None or audio is None:
-                    raise RenderError("Every scene requires visual and narration assets")
-                inputs.append(
-                    SceneInput(
-                        scene_id=scene.id,
-                        visual_asset_id=visual.id,
-                        audio_asset_id=audio.id,
-                        duration=float(scene.duration),
-                        narration=scene.narration,
-                        motion=scene.camera_motion,
+                inputs = []
+                for scene in scenes:
+                    assets = db.exec(
+                        select(Asset)
+                        .where(Asset.video_id == video.id, Asset.scene_id == scene.id)
+                        .order_by(Asset.created_at.desc(), Asset.id.desc())
+                    ).all()
+                    if scene.visual_type.value not in ("image", "video"):
+                        raise RenderError("Scene requires a supported visual type")
+                    visual = next(
+                        (a for a in assets if a.type.value == scene.visual_type.value), None
                     )
+                    audio = next((a for a in assets if a.type == AssetType.AUDIO), None)
+                    if visual is None or audio is None:
+                        raise RenderError("Every scene requires visual and narration assets")
+                    inputs.append(
+                        SceneInput(
+                            scene_id=scene.id,
+                            visual_asset_id=visual.id,
+                            audio_asset_id=audio.id,
+                            duration=float(scene.duration),
+                            narration=scene.narration,
+                            motion=scene.camera_motion,
+                        )
+                    )
+                manifest = RenderManifest(
+                    scenes=inputs, music_asset_id=task.parameters.get("music_asset_id")
                 )
-            manifest = RenderManifest(
-                scenes=inputs, music_asset_id=task.parameters.get("music_asset_id")
-            )
             if sum(round(s.duration * 30) / 30 for s in manifest.scenes) > 180.1:
                 raise RenderError("Render duration exceeds 180 seconds")
             if manifest.music_asset_id:

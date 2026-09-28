@@ -4,12 +4,13 @@ FastAPI + PostgreSQL, schematy API Pydantic, konfiguracja `pydantic-settings`,
 hasła Argon2id i tokeny dostępu JWT (HS256). Modele bazy i sesje korzystają z SQLModel (opartego na SQLAlchemy i Pydantic),
 a migracje z Alembic. E-maile są zapisywane małymi literami i unikalne.
 
-## Stan projektu — etapy 1–15
+## Stan projektu — etapy 1–16
 
 Modularny monolit FastAPI z JWT, PostgreSQL/SQLModel, Redis i SeaweedFS.
 Działa analiza kanału, pomysły, scenariusze STORY/TOP5, Director, adaptery
-Runpod/TTS, asynchroniczne zadania Dramatiq i renderer FFmpeg. Kontrola jakości
-pozostaje na etap 16. Szczegóły: [docs/architecture.md](docs/architecture.md).
+Runpod/TTS, asynchroniczne zadania Dramatiq, renderer FFmpeg i techniczna kontrola
+jakości z naprawą pojedynczych scen. Po pozytywnym QC film otrzymuje stan `READY`.
+Szczegóły: [docs/architecture.md](docs/architecture.md).
 
 **Od etapu 14 operacje generowania zwracają `202` i zadanie, a wynik odbiera się
 przez GET /api/v1/tasks/{id}.** Opisy wcześniejszych etapów dokumentują także
@@ -239,13 +240,12 @@ Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
 
 
-## TODO po etapie 15
+## TODO po etapie 16
 
-- Etap 16: kontrola jakości.
 - Etapy 17–20: scheduler, panelowe API, budżety i rozszerzona obserwowalność.
 
-Worker i dispatcher są uruchamiane w Compose. Nie ma jeszcze schedulera, pełnego
-workflow do READY ani polecenia seed/demo. Adapter OpenAI jest używany przez jawną analizę kanału. Sam start w trybie
+Worker i dispatcher są uruchamiane w Compose. Nie ma jeszcze schedulera ani polecenia seed/demo.
+Render uruchamiany ręcznie prowadzi już przez kontrolę jakości do READY. Adapter OpenAI jest używany przez jawną analizę kanału. Sam start w trybie
 `live` nie wykonuje płatnych operacji.
 
 
@@ -1153,7 +1153,7 @@ MockTransport, bez połączeń do ElevenLabs i bez kosztów GPU/TTS.
 Wybrano **Dramatiq + Redis**: wykorzystuje istniejący Redis, ma prosty model actorów
 i wystarcza do modularnego monolitu. PostgreSQL pozostaje źródłem stanu zadania;
 Redis przenosi wyłącznie jego UUID. Kolejki: `content`, `research`, `image`, `video`,
-`audio`, `render`, `quality`. Kolejka `render` jest obsługiwana od etapu 15; `quality` czeka na etap 16.
+`audio`, `render`, `quality`. Kolejka `render` działa od etapu 15, a `quality` od etapu 16.
 [Zasady dostarczania Dramatiq](https://dramatiq.io/best_practices.html).
 
 ### Uruchomienie
@@ -1289,7 +1289,9 @@ wyciszana podczas narracji (`sidechaincompress`). Opis filtrów:
    `{"music_asset_id":"UUID"}` zwraca `202` i Task. Muzyka musi być istniejącym
    assetem audio tego samego filmu; upload/biblioteka muzyczna nie są częścią tego etapu.
 4. Odpytuj `GET /api/v1/tasks/{task_id}`. Wynik zawiera `asset_id`,
-   `subtitle_asset_id` oraz `status: "QUALITY_CHECK"`.
+   `subtitle_asset_id`, `quality_task_id` oraz `status: "QUALITY_CHECK"`.
+   Od etapu 16 worker automatycznie zleca QC; śledź `quality_task_id` i raporty
+   `GET /api/v1/videos/{video_id}/quality-checks`.
 5. `GET /api/v1/assets/{asset_id}/download` pobiera plik przez uwierzytelnione API.
    `GET /api/v1/videos/{video_id}/assets` zwraca listę plików bez kluczy storage i sekretów.
 
@@ -1298,7 +1300,7 @@ Pierwsze wykonanie zapisuje w Task niezmienny manifest: kolejność, tekst, ruch
 czas scen oraz najnowsze pasujące assety. Blokada filmu zapobiega równoległym
 renderom różnych zadań. Brak assetów nie przesuwa filmu do następnego stanu.
 Gotowy plik, napisy i przejście `RENDERING → QUALITY_CHECK` są zatwierdzane razem.
-Nie ustawiamy `READY` — to zadanie kontroli jakości w kolejnym etapie.
+Sam renderer nie ustawia `READY`; robi to kontrola jakości z etapu 16.
 
 Po restarcie worker może odtworzyć lokalny render z manifestu lub odzyskać
 już zapisany wynik. Błędy FFmpeg/storage mają ograniczone ponowienia; wyczerpanie
@@ -1338,5 +1340,110 @@ renderu; transfery storage mają osobne timeouty adaptera.
 
 Pobrane pliki są weryfikowane przez rozmiar i SHA-256. FFmpeg dostaje konkretne
 demuxery i whitelistę protokołów `file,pipe`; napisy nie mogą wstrzykiwać poleceń ASS.
-Brak jeszcze oceny jakości, automatycznej publikacji i automatycznego wyzwalania
-renderu po ukończeniu wszystkich assetów — to kolejne etapy.
+Od etapu 16 działa techniczna kontrola jakości. Brak jeszcze automatycznej publikacji
+i automatycznego wyzwalania pierwszego renderu po ukończeniu wszystkich assetów.
+
+## Etap 16 — Quality Control
+
+Po zakończeniu renderu worker atomowo zapisuje wynik zadania i zleca zadanie
+`quality`. `QualityCheck` (SQLModel, migracja `0014`) przechowuje historię ocen,
+przypisany render/asset, wyniki poszczególnych kontroli, progi, numer próby oraz
+identyfikatory zadań naprawczych. Jednemu renderowi odpowiada jeden raport.
+Ponowne dostarczenie zadania lub restart workera nie tworzą dodatkowych napraw.
+
+### Kontrole techniczne
+
+- Finalny MP4 istnieje w skonfigurowanym prywatnym storage.
+- Rozmiar i SHA-256 plików odpowiadają metadanym; wymagane assety nie są puste.
+- Film ma 1080×1920, H.264, AAC i 30 fps; ścieżka audio ma dodatni czas trwania.
+- Czas filmu różni się od `Video.duration_target` najwyżej o skonfigurowaną
+  tolerancję (domyślnie 1 s), a od sumy scen w manifeście najwyżej o 0,25 s.
+- Manifest zawiera wszystkie sceny, w poprawnej kolejności i bez duplikatów.
+  Każda ma wizualny asset i narrację przypisane do tego samego filmu i sceny.
+- FFmpeg dekoduje plik końcowy i wymagane fragmenty assetów. Same nagłówki
+  odczytane przez ffprobe nie wystarczają do uznania pliku za poprawny.
+
+Używamy `-xerror` i `-err_detect explode`; szczegóły opisuje
+[dokumentacja FFmpeg](https://ffmpeg.org/ffmpeg.html). FFmpeg nadal dostaje prywatne
+pliki lokalne, określone demuxery, ograniczenia czasu i protokoły `file,pipe`.
+
+Przy pozytywnej kontroli raport otrzymuje `passed`, a film `READY`. To gotowość
+techniczna; nie jest oceną atrakcyjności, prawdziwości treści ani zgodności obrazu
+z narracją. Obecność ścieżki audio nie oznacza wykrycia mowy — mock TTS jest cichy.
+
+### Naprawa scen i ograniczenia
+
+Gdy wszystkie wykryte usterki można przypisać do assetów scen, QC zleca tylko
+wymagane zadania `image`, `video` lub `audio`. Zdrowe assety i scenariusz pozostają
+z pierwotnego manifestu. Naprawa TTS ma osobny klucz idempotencji przypisany do
+raportu QC, więc może utworzyć nowy plik, ale retry tej samej naprawy nie nalicza
+kolejnego generowania.
+
+Raport jest wtedy `repairing`, a film pozostaje w `QUALITY_CHECK`. Po zakończeniu
+napraw raport otrzymuje `repaired`, film wraca do `GENERATING_ASSETS`, a worker
+zleca złożenie nowego MP4 i kolejną kontrolę. Ponowne złożenie całego kontenera MP4
+jest konieczne; ponowne generowanie AI dotyczy tylko wadliwych assetów.
+Domyślnie dopuszczamy maksymalnie **2 rundy napraw na film**. Nie zmieniamy
+automatycznie scenariusza ani nie skracamy zbyt długiej narracji.
+
+Błąd całego filmu (np. brak finalnego MP4, zły czas lub rozdzielczość), brak
+poprawnego manifestu, błąd zadania naprawczego, timeout oczekiwania albo
+wyczerpanie limitu kończą kontrolę jako `failed` i film jako `FAILED`.
+Nie ma jeszcze publicznego endpointu ręcznego wznowienia filmu — należy do
+etapu 18. Przejście `QUALITY_CHECK → GENERATING_ASSETS` wykonuje wyłącznie
+wewnętrzna ścieżka napraw; nie ma endpointu do dowolnej zmiany stanu filmu.
+
+Awaria storage/narzędzia lub niedostępność providera vision nie jest oceną
+wadliwej sceny. Takie błędy mają ograniczone retry zadania (domyślnie 3 próby),
+a po ich wyczerpaniu Task ma `needs_review` i film pozostaje `QUALITY_CHECK`.
+Nie uruchamiamy wtedy ponownego płatnego generowania. W raporcie może pozostać
+`checking`; stan błędu wykonania jest dostępny przez jego `task_id`.
+
+### API
+
+Wszystkie endpointy wymagają JWT właściciela filmu:
+
+```http
+GET /api/v1/videos/{video_id}/quality-checks
+POST /api/v1/videos/{video_id}/quality-check
+GET /api/v1/tasks/{task_id}
+```
+
+POST nie wymaga body, zwraca `202` i ten sam Task QC dla ostatniego ukończonego
+renderu. Pozwala też zlecić kontrolę filmu wyrenderowanego przed wdrożeniem etapu 16.
+GET zwraca kolejne raporty: `checking`, `repairing`, `repaired`, `passed`, `failed`,
+w tym listę `report_json.checks` z kodem, wynikiem (`passed`/`failed`/`skipped`),
+identyfikatorem sceny i assetu. Raporty nie zawierają ścieżek lokalnych ani sekretów.
+Task `succeeded` oznacza wykonanie kontroli — jej werdykt może być `failed`.
+Po naprawie `rerender_task_id` wskazuje następny render; jego wynik wskazuje nowe QC.
+
+### Interfejs oceny wizualnej
+
+`VisualQualityProvider.check(VisualQualityRequest) -> VisualQualityResult` jest
+punktem rozszerzenia w `app/modules/quality/provider.py`. Adapter zgłasza
+`requires_frames`, otrzymuje identyfikator sceny, jej prompt i lokalne klatki PNG
+z finalnego filmu. Fabrykę providera można wymienić bez zmian w rendererze.
+
+Domyślny adapter `disabled` zwraca **skipped**, nie pozoruje oceny vision i nie
+wykonuje płatnych calli. Przyszły adapter powinien walidować odpowiedź do modelu
+Pydantic, zwracać bezpieczne kody i zgłaszać `VisualQualityUnavailable` przy
+awarii. Negatywna ocena konkretnej sceny korzysta z tej samej ograniczonej ścieżki
+napraw. Testowy adapter sprawdza rzeczywiste klatki przekazane przez tę ścieżkę.
+
+### Konfiguracja i uruchomienie
+
+```dotenv
+QUALITY_DURATION_TOLERANCE_SECONDS=1.0
+QUALITY_MAX_SCENE_RETRIES=2
+QUALITY_TIMEOUT_SECONDS=180
+QUALITY_REPAIR_TIMEOUT_SECONDS=3600
+```
+
+`QUALITY_MAX_SCENE_RETRIES=0` wyłącza automatyczne naprawy. Timeout QC ogranicza
+operacje FFmpeg; transfery mają timeout adaptera storage. Suma pobieranych plików
+(wejścia i finalny film) podlega `RENDER_MAX_INPUT_BYTES`, a pojedynczy plik
+`STORAGE_MAX_BYTES`. Progi i limit napraw są zapisane w raporcie.
+
+Po aktualizacji uruchom `docker compose up -d --build`; API wykona migrację.
+Dla instalacji lokalnej: `uv run alembic upgrade head`, a następnie restart
+API, workera i dispatchera. Nie uruchamiamy jeszcze schedulera z etapu 17.

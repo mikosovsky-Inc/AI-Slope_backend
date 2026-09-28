@@ -1,4 +1,5 @@
 from contextlib import ExitStack
+from uuid import UUID
 
 from sqlmodel import Session, select
 
@@ -40,6 +41,21 @@ def execute_operation(db: Session, task: Task, settings: Settings) -> dict:
         stack.callback(provider.close)
         return provider
 
+    if task.parameters.get("quality_check_id"):
+        from app.modules.quality.models import QualityCheck, QualityStatus
+        from app.modules.videos.models import VideoStatus
+
+        check = db.get(QualityCheck, UUID(task.parameters["quality_check_id"]))
+        video = owned_video(db, task.owner_id, task.video_id)
+        if (
+            check is None
+            or check.video_id != task.video_id
+            or check.status != QualityStatus.REPAIRING
+            or video.status != VideoStatus.QUALITY_CHECK
+            or not any(item["task_id"] == str(task.id) for item in check.repair_tasks)
+        ):
+            raise ValueError("Scene repair is no longer authorized by its quality check")
+        db.commit()
     with ExitStack() as stack:
         kind = task.kind
         args = (db, task.owner_id, task.video_id)
@@ -76,7 +92,19 @@ def execute_operation(db: Session, task: Task, settings: Settings) -> dict:
                 managed(stack, create_tts_provider),
                 managed(stack, create_storage_provider),
                 settings,
+                regeneration_id=UUID(task.parameters["quality_check_id"])
+                if task.parameters.get("quality_check_id")
+                else None,
             )
+        elif kind == TaskKind.QUALITY:
+            from app.modules.quality.provider import create_visual_quality_provider
+            from app.modules.quality.service import QualityService
+
+            visual_provider = create_visual_quality_provider()
+            stack.callback(visual_provider.close)
+            return QualityService(
+                settings, managed(stack, create_storage_provider), visual_provider
+            ).run(db, task)
         elif kind == TaskKind.RENDER:
             from app.modules.render.service import RenderService
 

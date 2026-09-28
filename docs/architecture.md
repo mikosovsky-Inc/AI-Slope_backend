@@ -656,3 +656,58 @@ zewnętrznych providerów; sam FFmpeg, broker i storage były rzeczywiste.
 Końcowa walidacja: 283 testy passed (33 istniejące ostrzeżenia zależności),
 Ruff check/format oraz git diff --check bez błędów. GitHub Actions instaluje
 FFmpeg i fonty, aby te same testy renderu działały na PR i push.
+
+## Etap 16 — Quality Control
+
+`QualityService` realizuje przejście QUALITY_CHECK → READY na podstawie
+`QualityInspector`, który pobiera prywatne pliki przez StorageProvider, sprawdza
+integralność, metadane ffprobe, dekodowanie FFmpeg i kompletność manifestu scen.
+Sprawdzane są wymagane assety konkretnego renderu, a nie wszystkie historyczne
+pliki filmu. Nie oceniamy semantycznej zgodności obrazu ze scenariuszem bez vision.
+
+SQLModel `QualityCheck` ma unikalne powiązania z renderem i zadaniem QC oraz
+kolejny numer próby w filmie. Migracja `0014` dodaje tabelę, CHECK stanów/czasów,
+klucze obce, indeks po filmie i rodzaj Task `quality`. Raport i przejście stanu są
+zatwierdzane w jednej transakcji. Metadane assetów i raporty pozostają w PostgreSQL,
+pliki w storage; klatki i dekodowane wejścia są tymczasowe.
+
+Udany render atomowo kończy Task i zapisuje zadanie QC w istniejącym outboxie.
+Blokada advisory Task chroni wykonanie; blokady User → Video porządkują zapis
+raportu i zlecanie napraw. Awaria po zapisaniu wyniku QC pozwala odczytać raport
+bez powtórnego sprawdzania lub generowania. Ten sam render zawsze ma jeden raport.
+
+Wadliwa scena uruchamia tylko niezbędną regenerację jej assetu. Raport trwale
+przechowuje dzieci i pozostaje repairing. Oczekiwanie nie zużywa kolejnych prób
+technicznych; ma osobny deadline. Po sukcesie dzieci do kopii pierwotnego manifestu
+trafiają ich nowe assety; zdrowe wejścia nie są wybierane ponownie według daty.
+Powstaje nowy render i nowy raport QC. Limit dotyczy rund napraw całego filmu,
+więc powtarzające się awarie różnych scen także nie prowadzą do nieskończonej pętli.
+Kosztowne naprawy korzystają z istniejącej ostrożnej obsługi niepewnego wyniku
+providera. Po wygaśnięciu naprawy jej nieuruchomione dzieci odmawiają generowania.
+
+Stan naprawiony raportu nie oznacza READY: tylko kolejny raport passed może
+ustawić gotowość. Usterki globalne i wyczerpanie limitu ustawiają FAILED; awarie
+infrastruktury zatrzymują zadanie jako needs_review bez regenerowania scen.
+StorageObjectMissing odróżnia brak obiektu od niedostępności storage.
+
+`VisualQualityProvider` jest interfejsem przyszłego adaptera vision. Domyślna
+implementacja disabled oznacza skipped. Adapter może otrzymać klatkę ze środka
+każdej sceny finalnego MP4; negatywna ocena używa tej samej ścieżki napraw.
+Żadne wywołanie OpenAI/Runpoda nie jest dodane do renderera ani inspektora.
+
+Autoryzowane endpointy POST quality-check i GET quality-checks są opisane w README.
+Nie rozpoczęto etapu 17 — schedulera — ani endpointów ręcznej edycji i ponawiania
+filmów z etapu 18.
+
+Weryfikacja 2026-09-28: pełny zestaw zakończył się wynikiem **304 passed**
+(35 ostrzeżeń istniejących zależności). Ruff check/format i git diff --check
+bez błędów. Testy obejmują wszystkie kontrole techniczne, naprawę wyłącznie
+wadliwego obrazu/audio, rzeczywiste klatki dla testowego providera vision,
+limit rund, awarie infrastruktury, timeout naprawy, autoryzację, odzyskiwanie
+wyniku, unikalność raportu oraz równoległe wykonanie na PostgreSQL.
+
+Test uruchomionego Compose przeszedł przez HTTP, outbox, Redis, dispatcher,
+workera i SeaweedFS: STORY → Director → 5 scen z assetami → render → QC passed
+→ READY potwierdzone odczytem PostgreSQL. Pobranie finalnego MP4 przez JWT API
+zwróciło 309105 bajtów. Zewnętrzne generatory działały jako mocki; media, FFmpeg,
+PostgreSQL, broker i storage były rzeczywiste. Nie wykonywano płatnych calli.

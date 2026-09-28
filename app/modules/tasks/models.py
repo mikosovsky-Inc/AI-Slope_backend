@@ -21,6 +21,7 @@ class TaskKind(StrEnum):
     VIDEO = "video"
     AUDIO = "audio"
     RENDER = "render"
+    QUALITY = "quality"
 
 
 class TaskStatus(StrEnum):
@@ -43,6 +44,7 @@ QUEUES = {
     TaskKind.VIDEO: "video",
     TaskKind.AUDIO: "audio",
     TaskKind.RENDER: "render",
+    TaskKind.QUALITY: "quality",
 }
 ALL_QUEUES = ("content", "research", "image", "video", "audio", "render", "quality")
 

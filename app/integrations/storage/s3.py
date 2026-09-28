@@ -7,7 +7,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from app.core.config import Settings
 from app.integrations.storage.streams import copy_object
-from app.shared.storage import StorageError, StoredObject, validate_key
+from app.shared.storage import StorageError, StorageObjectMissing, StoredObject, validate_key
 
 
 class S3StorageProvider:
@@ -73,7 +73,11 @@ class S3StorageProvider:
                 )
             finally:
                 source.close()
-        except (BotoCoreError, ClientError, OSError):
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in ("NoSuchKey", "NotFound", "404"):
+                raise StorageObjectMissing("Object unavailable") from None
+            raise StorageError("S3 storage unavailable") from None
+        except (BotoCoreError, OSError):
             raise StorageError("S3 storage unavailable") from None
 
     def get_url(self, key: str) -> str:

@@ -4,6 +4,7 @@ from app.api.routes.auth import router as auth_router
 from app.api.routes.channels import router as channels_router
 from app.api.routes.director import router as director_router
 from app.api.routes.ideas import router as ideas_router
+from app.api.routes.quality import router as quality_router
 from app.api.routes.render import router as render_router
 from app.api.routes.research import router as research_router
 from app.api.routes.scripts import router as scripts_router
@@ -25,3 +26,5 @@ router.include_router(director_router)
 router.include_router(tasks_router)
 
 router.include_router(render_router)
+
+router.include_router(quality_router)

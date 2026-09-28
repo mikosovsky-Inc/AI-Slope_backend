@@ -10,6 +10,8 @@ from sqlmodel import Session, select
 from app.core.config import get_settings
 from app.models.user import User
 from app.modules.audio.service import AudioConflict
+from app.modules.quality.provider import VisualQualityUnavailable
+from app.modules.quality.service import QualityPending, enqueue_quality
 from app.modules.render.engine import RenderError
 from app.modules.tasks.models import Task, TaskKind, TaskStatus
 from app.modules.tasks.service import enqueue
@@ -87,7 +89,8 @@ def run_task(engine, task_id: str, *, settings=None) -> None:
                 else:
                     if (
                         recovering
-                        and task.kind not in (TaskKind.AUDIO, TaskKind.DIRECT, TaskKind.RENDER)
+                        and task.kind
+                        not in (TaskKind.AUDIO, TaskKind.DIRECT, TaskKind.RENDER, TaskKind.QUALITY)
                         and not task.checkpoint.get("provider_job")
                     ):
                         raise ReviewRequired
@@ -117,6 +120,9 @@ def run_task(engine, task_id: str, *, settings=None) -> None:
                         key=f"workflow:{task.video_id}:{next_kind}",
                         commit=False,
                     )
+                if task.kind == TaskKind.RENDER:
+                    quality_task = enqueue_quality(db, task.owner_id, task, commit=False)
+                    task.result = task.result | {"quality_task_id": str(quality_task.id)}
                 db.add(task)
                 db.commit()
             except Exception as exc:
@@ -124,7 +130,20 @@ def run_task(engine, task_id: str, *, settings=None) -> None:
                 task = db.get(Task, identifier)
                 if task is None or task.run_token != token:
                     return
-                if isinstance(exc, PollLater):
+                if isinstance(exc, QualityPending):
+                    task.attempts = max(0, task.attempts - 1)
+                    task.status = TaskStatus.QUEUED
+                    task.available_at = datetime.now(UTC) + timedelta(seconds=5)
+                elif (
+                    task.kind == TaskKind.QUALITY
+                    and isinstance(
+                        exc, (StorageError, RenderError, VisualQualityUnavailable, OSError)
+                    )
+                    and task.attempts < task.max_attempts
+                ):
+                    task.status = TaskStatus.QUEUED
+                    task.available_at = datetime.now(UTC) + timedelta(seconds=2**task.attempts)
+                elif isinstance(exc, PollLater):
                     if datetime.now(UTC) - task.started_at.replace(tzinfo=UTC) > timedelta(
                         milliseconds=settings.runpod_job_ttl_ms
                     ):
@@ -150,17 +169,21 @@ def run_task(engine, task_id: str, *, settings=None) -> None:
                     task.available_at = datetime.now(UTC) + timedelta(seconds=2**task.attempts)
                 else:
                     uncertain = (
-                        task.kind == TaskKind.RENDER
-                        and bool(task.checkpoint.get("render_manifest"))
-                    ) or isinstance(
-                        exc,
-                        (
-                            ReviewRequired,
-                            AudioConflict,
-                            TTSOutcomeUnknown,
-                            GenerationSubmissionUnknown,
-                            SQLAlchemyError,
-                        ),
+                        task.kind == TaskKind.QUALITY
+                        or (
+                            task.kind == TaskKind.RENDER
+                            and bool(task.checkpoint.get("render_manifest"))
+                        )
+                        or isinstance(
+                            exc,
+                            (
+                                ReviewRequired,
+                                AudioConflict,
+                                TTSOutcomeUnknown,
+                                GenerationSubmissionUnknown,
+                                SQLAlchemyError,
+                            ),
+                        )
                     )
                     task.status = TaskStatus.NEEDS_REVIEW if uncertain else TaskStatus.FAILED
                     task.error = "execution_requires_review" if uncertain else "execution_failed"
