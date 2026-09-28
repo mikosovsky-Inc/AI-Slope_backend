@@ -236,10 +236,10 @@ Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
 
 
-## TODO po etapie 11
+## TODO po etapie 12
 
-- Etap 12: ImageGenerationProvider, VideoGenerationProvider i adapter Runpod (mock/live).
-- Etapy 13–16: TTS, Dramatiq, FFmpeg i kontrola jakości.
+- Etap 13: TTSProvider i ElevenLabs (mock/live).
+- Etapy 14–16: Dramatiq, trwała orkiestracja generowania, FFmpeg i kontrola jakości.
 - Etapy 17–20: scheduler, panelowe API, budżety i rozszerzona obserwowalność.
 
 Na tym etapie nie ma workerów ani schedulera do uruchomienia, pełnego video
@@ -925,3 +925,110 @@ uv run --no-active pytest -ra
 Używaj środowiska testowego. Test S3 zapisuje i usuwa wyłącznie losowy własny klucz
 `integration/<uuid>/image.png`. GitHub Actions uruchamia własny SeaweedFS obok
 PostgreSQL i Redis, dzięki czemu ten test jest wykonywany przy push i PR.
+
+## Etap 12 — interfejs generowania i Runpod
+
+`app/shared/generation.py` definiuje `ImageGenerationProvider` oraz
+`VideoGenerationProvider`. Metody `generate_image()` / `generate_video()` zwracają
+referencję zleconego zadania i bieżący status. `get_status()` odczytuje wynik,
+`cancel()` wysyła żądanie anulowania, a `close()` zwalnia klienta HTTP.
+Są to wewnętrzne interfejsy Pythona, bez nowych publicznych endpointów HTTP.
+
+Wejście i wynik są modelami Pydantic. Request zawiera `request_id`, prompt,
+rozdzielczość, opcjonalny seed i słownik parametrów konkretnego workera; video
+wymaga dodatkowo `duration_seconds`. Referencja `GenerationJobRef` zawiera provider,
+endpoint_id i job_id. Zachowanie endpoint_id pozwala odpytać starsze zadanie po
+zmianie domyślnego endpointu w `.env`. Referencje pochodzą z zaufanego backendu,
+nie należy przyjmować ich bezpośrednio od użytkownika bez kontroli właściciela.
+
+### Mock
+
+`EXTERNAL_PROVIDERS_MODE=mock` wybiera `MockRunpodProvider`. Kolejne odczyty
+przeprowadzają zadanie przez queued → running → succeeded. Anulowanie zadania
+oczekującego lub pracującego daje cancelled; gotowy wynik pozostaje gotowy.
+Ten sam request_id i dane zwracają to samo zadanie, a zmienione dane pod tym samym
+ID są odrzucane. Pamięć mocka jest lokalna dla procesu i znika przy jego zamknięciu.
+Mock zwraca JSON z `mock: true`; nie produkuje jeszcze plików PNG/MP4.
+
+Przykład bez sieci i płatnych wywołań:
+
+```python
+from app.integrations.runpod.mock import MockRunpodProvider
+from app.shared.generation import ImageGenerationRequest
+
+provider = MockRunpodProvider()
+try:
+    submitted = provider.generate_image(
+        ImageGenerationRequest(request_id="demo-scene-1", prompt="A misty forest")
+    )
+    running = provider.get_status(submitted.job)
+    completed = provider.get_status(submitted.job)
+    assert completed.output["mock"] is True
+finally:
+    provider.close()
+```
+
+FastAPI tworzy wybrany adapter w lifespan, udostępnia go jako
+`app.state.generation` / zależność `CurrentGeneration` i zamyka podczas shutdown.
+Start aplikacji sam nie wysyła żadnego zadania.
+
+### Live
+
+`EXTERNAL_PROVIDERS_MODE=live` wybiera `RunpodProvider` korzystający z httpx.
+Ustaw w `.env` (Compose przekazuje te zmienne):
+
+| Zmienna | Znaczenie / domyślnie |
+| --- | --- |
+| `RUNPOD_API_KEY` | SecretStr, wymagany przy operacji live |
+| `RUNPOD_IMAGE_ENDPOINT_ID` | ID własnego endpointu obrazów |
+| `RUNPOD_VIDEO_ENDPOINT_ID` | ID własnego endpointu wideo |
+| `RUNPOD_IMAGE_MODEL` | opcjonalny identyfikator modelu przekazywany workerowi |
+| `RUNPOD_VIDEO_MODEL` | opcjonalny identyfikator modelu przekazywany workerowi |
+| `RUNPOD_TIMEOUT_SECONDS` | timeout operacji HTTP, 20 s |
+| `RUNPOD_STATUS_MAX_RETRIES` | ponowienia odczytu statusu, 2 (maks. 3) |
+| `RUNPOD_EXECUTION_TIMEOUT_MS` | limit wykonania u providera, 600000 ms |
+| `RUNPOD_JOB_TTL_MS` | czas życia zadania, 3600000 ms; nie mniejszy niż execution timeout |
+
+Globalny tryb live dotyczy też istniejącego adaptera OpenAI, więc jego wcześniejsze
+wymagania konfiguracyjne nadal obowiązują. Brak konfiguracji Runpod jest zgłaszany
+przy użyciu adaptera i nie blokuje samego logowania czy analizy kanału.
+
+Adapter używa kolejki Runpod: POST `/run`, GET `/status/{id}` i POST `/cancel/{id}`
+pod `https://api.runpod.ai/v2/{endpoint_id}`. Anulowanie potwierdza przyjęcie żądania;
+końcowy status należy odczytać osobno. Endpoint musi być typu queue-based.
+Kontrakt workera zależy od wdrożonego handlera; backend wysyła nasze pola jako
+`input` i limity jako `policy`. Worker musi rozumieć `type`, `request_id`, `prompt`,
+`width`, `height`, `parameters`, opcjonalne `seed`/`model` i `duration_seconds` dla video.
+Nie zakładamy konkretnego FLUX, Wan ani formatu odpowiedzi gotowego szablonu.
+[Dokumentacja Runpod](https://docs.runpod.io/serverless/endpoints/send-requests).
+
+Statusy zewnętrzne są mapowane na enum:
+queued, running, succeeded, failed, cancelled, timed_out. Wynik `output` pozostaje
+JSON-em specyficznym dla workera; ukończone zadanie musi go zawierać. Adapter nie
+pobiera adresów zwróconych przez workera. Przyszła integracja Asset musi zweryfikować
+format wyniku i bezpiecznie skopiować media do własnego storage. Limit odpowiedzi
+adaptera wynosi 1 MiB, a requestu 256 KiB — duże media powinny być w object storage.
+[Operacje Runpod](https://docs.runpod.io/serverless/endpoints/operation-reference).
+
+### Błędy i ponowienia
+
+Odczyt statusu ponawia błędy transportu, 429 i 5xx z ograniczonym exponential
+backoff. POST nie jest automatycznie ponawiany. Timeout, 5xx lub niepoprawna
+odpowiedź przy wysłaniu zadania daje `GenerationSubmissionUnknown`: zewnętrzny
+job mógł już powstać. Nie należy wtedy automatycznie wysyłać nowego `/run`.
+`request_id` służy korelacji z workerem; nie daje gwarancji deduplikacji przez API
+Runpod. Worker może implementować własną deduplikację na tym kluczu.
+
+Brak endpointu/joba, odrzucenie requestu, chwilowa niedostępność i niepoprawny wynik
+mają osobne typy błędów. Komunikaty nie zawierają surowych odpowiedzi ani sekretów.
+Redirecty HTTP są wyłączone. Adapter nie odpytuje statusu w nieskończonej pętli.
+
+Ten etap nie zmienia jeszcze GenerationJob w DB ani stanu Video i nie generuje
+Asset automatycznie. Trwałe zapisywanie referencji, odzyskiwanie po restarcie,
+rozstrzyganie niejednoznacznego submitu, kolejki i limity ponowień należą do integracji
+workflow z workerami (etap 14). Nie należy utożsamiać enumu statusu providera z
+obecnym czterostanowym enumem GenerationJob bez jawnego mapowania.
+
+Testy `tests/unit/test_runpod.py` obejmują mock, kontrakt HTTP adaptera live,
+konfigurację, błędy, ograniczenia i retries. Transport HTTP jest zastąpiony
+`httpx.MockTransport`; testy nie uruchamiają GPU ani nie wymagają konta Runpod.

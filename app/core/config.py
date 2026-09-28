@@ -23,6 +23,15 @@ class Settings(BaseSettings):
     redis_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     external_providers_mode: Literal["mock", "live"] = "mock"
+    runpod_api_key: SecretStr | None = None
+    runpod_image_endpoint_id: str = Field(default="", pattern=r"^[A-Za-z0-9_-]*$", max_length=200)
+    runpod_video_endpoint_id: str = Field(default="", pattern=r"^[A-Za-z0-9_-]*$", max_length=200)
+    runpod_image_model: str = Field(default="", max_length=200)
+    runpod_video_model: str = Field(default="", max_length=200)
+    runpod_timeout_seconds: float = Field(default=20, gt=0, le=120)
+    runpod_status_max_retries: int = Field(default=2, ge=0, le=3)
+    runpod_execution_timeout_ms: int = Field(default=600000, ge=5000, le=3600000)
+    runpod_job_ttl_ms: int = Field(default=3600000, ge=10000, le=86400000)
     openai_api_key: SecretStr | None = None
     openai_model: str = ""
     openai_timeout_seconds: float = Field(default=30, gt=0, le=120)
@@ -51,6 +60,12 @@ class Settings(BaseSettings):
     s3_region: str = "us-east-1"
     s3_access_key_id: SecretStr | None = None
     s3_secret_access_key: SecretStr | None = None
+
+    @model_validator(mode="after")
+    def validate_runpod_policy(self) -> "Settings":
+        if self.runpod_job_ttl_ms < self.runpod_execution_timeout_ms:
+            raise ValueError("Runpod job TTL must cover execution timeout")
+        return self
 
     @model_validator(mode="after")
     def validate_storage(self) -> "Settings":

@@ -14,6 +14,7 @@ from app.core.logging import configure_logging
 from app.core.redis import create_redis_client
 from app.db.session import get_engine
 from app.integrations.llm.factory import create_llm_provider
+from app.integrations.runpod.factory import create_generation_provider
 from app.integrations.storage.factory import create_storage_provider
 
 
@@ -24,11 +25,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger = logging.getLogger("app.lifecycle")
     app.state.storage = create_storage_provider(settings)
     app.state.llm = create_llm_provider(settings)
+    app.state.generation = create_generation_provider(settings)
     app.state.redis = create_redis_client(settings)
     logger.info("API started")
     try:
         yield
     finally:
+        app.state.generation.close()
         app.state.storage.close()
         app.state.llm.close()
         app.state.redis.close()

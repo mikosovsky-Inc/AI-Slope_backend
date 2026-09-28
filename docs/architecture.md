@@ -449,3 +449,55 @@ Docker uruchomił API jako healthy; kontrola HTTP potwierdziła health/ready/doc
 a kontrola z kontenera zapis, odczyt i usuwanie obiektu oraz publiczny host podpisu.
 GitHub Actions otrzymał SeaweedFS i test integracyjny S3. Testowy stos jest izolowany
 od danych użytkownika. Następny etap: Runpod Interface (12).
+
+## Etap 12 — Runpod Interface
+
+ImageGenerationProvider i VideoGenerationProvider definiują submit, status i cancel
+na modelach Pydantic. Interfejsy nie zależą od httpx ani SDK dostawcy. Referencja
+GenerationJobRef przechowuje nazwę providera, endpoint_id i job_id, dzięki czemu
+zmiana konfiguracji nie przekieruje odczytu istniejącego zadania do innego endpointu.
+ProviderJobStatus jawnie rozróżnia queued/running/succeeded/failed/cancelled/timed_out.
+To status integracji, a nie automatyczna zmiana Video lub GenerationJob w DB.
+
+MockRunpodProvider przechowuje stan w pamięci, deterministycznie symuluje przebieg
+oraz anulowanie i deduplikuje request_id w danym typie generowania. Zmienione dane
+pod tym samym ID są odrzucane. Wynik jest oznaczony mock:true, bez fikcyjnego URL
+udającego istniejący plik. Mock nie produkuje mediów i nie przetrwa restartu.
+
+RunpodProvider obsługuje queue-based HTTP API przez httpx. Wysyła zadanie i oddaje
+sterowanie; nie blokuje requestu na czas generowania GPU. Osobne endpointy/model
+IDs dla obrazów i video pochodzą z pydantic-settings, podobnie SecretStr API key,
+timeout, polityka czasu wykonania i TTL. Model jest opcjonalną wskazówką dla własnego
+workera. Nie zakładamy formatu gotowego modelu lub szablonu. Dane wejściowe mają
+jawny kontrakt opisany w README; output pozostaje JSON-em konkretnego workera.
+Przyszły kod zapisujący Asset musi zweryfikować wynik przed pobraniem mediów.
+
+GET status ma ograniczone retries z exponential backoff. POST submit i cancel
+nie są automatycznie ponawiane. Niejednoznaczny submit (transport/5xx/nieprawidłowa
+odpowiedź) ma osobny błąd GenerationSubmissionUnknown; request_id w input nie jest
+gwarancją idempotencji API dostawcy. Worker może deduplikować go na własnym poziomie.
+Przyszły workflow musi zapisać stan wysyłania i referencję, rozstrzygać unknown oraz
+obsłużyć odzyskiwanie po restarcie. Nie obiecujemy exactly-once wykonania GPU.
+
+Limit requestu 256 KiB, limit JSON odpowiedzi 1 MiB, bez redirectów i bez pobierania
+URL z wyniku. Surowe błędy dostawcy nie trafiają do bezpiecznego wyniku integracji.
+Provider jest tworzony/zamykany w lifespan FastAPI. W live klucz/endpoint są wymagane
+przy użyciu; inicjalizacja nie wykonuje płatnych operacji. Nie dodano endpointów HTTP
+ani automatycznego przejścia SCRIPT_READY → GENERATING_ASSETS. Orkiestracja, trwałość
+jobów, zapis assetów i recovery zostają na integrację workerów w etapie 14.
+
+### Weryfikacja etapu 12 — 2026-09-28
+
+229 testów przeszło bez pominięć z PostgreSQL, Redis i SeaweedFS, w tym 37 nowych.
+Testy adaptera live używają httpx.MockTransport: kontrakt submit/status/cancel,
+wybór endpointu/modelu, mapowanie statusów, limit danych, backoff, timeout,
+nieponawianie submitu, niewłaściwe JSON/ID/status, bezpieczne komunikaty i brak
+przekierowań. Testy mocka obejmują replay, konflikt danych, kolejność parametrów,
+anulowanie i izolację zwracanych wyników. Sprawdzono też konfigurację z .env,
+maskowanie klucza i lifecycle aplikacji. Ruff i formatowanie poprawne.
+Nie wykonano rzeczywistej generacji GPU; zgodność konkretnego wdrożonego workera
+wymaga późniejszego testu na skonfigurowanym endpoincie. Następny etap: ElevenLabs (13).
+
+Kontener API osiągnął healthy. Końcowy smoke test potwierdził HTTP /health,
+/ready i /docs oraz zakończenie obrazu i anulowanie video w trybie mock.
+Po weryfikacji usunięto wyłącznie izolowany stos ai-slop-runpod-check.
