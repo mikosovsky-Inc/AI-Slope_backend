@@ -23,6 +23,15 @@ class Settings(BaseSettings):
     redis_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     external_providers_mode: Literal["mock", "live"] = "mock"
+    elevenlabs_api_key: SecretStr | None = None
+    elevenlabs_model: str = Field(default="", max_length=200)
+    elevenlabs_voice_id: str = Field(default="", pattern=r"^[A-Za-z0-9_-]*$", max_length=200)
+    elevenlabs_timeout_seconds: float = Field(default=60, gt=0, le=120)
+    elevenlabs_max_response_bytes: int = Field(default=16777216, ge=1024, le=67108864)
+    elevenlabs_send_language_code: bool = True
+    tts_usd_per_1000_characters: Decimal | None = Field(
+        default=None, ge=0, le=100, decimal_places=6
+    )
     runpod_api_key: SecretStr | None = None
     runpod_image_endpoint_id: str = Field(default="", pattern=r"^[A-Za-z0-9_-]*$", max_length=200)
     runpod_video_endpoint_id: str = Field(default="", pattern=r"^[A-Za-z0-9_-]*$", max_length=200)
@@ -60,6 +69,11 @@ class Settings(BaseSettings):
     s3_region: str = "us-east-1"
     s3_access_key_id: SecretStr | None = None
     s3_secret_access_key: SecretStr | None = None
+
+    @field_validator("tts_usd_per_1000_characters", mode="before")
+    @classmethod
+    def optional_tts_rate(cls, value: Decimal | str | None) -> Decimal | str | None:
+        return None if value in ("", "null") else value
 
     @model_validator(mode="after")
     def validate_runpod_policy(self) -> "Settings":

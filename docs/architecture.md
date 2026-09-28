@@ -501,3 +501,52 @@ wymaga późniejszego testu na skonfigurowanym endpoincie. Następny etap: Eleve
 Kontener API osiągnął healthy. Końcowy smoke test potwierdził HTTP /health,
 /ready i /docs oraz zakończenie obrazu i anulowanie video w trybie mock.
 Po weryfikacji usunięto wyłącznie izolowany stos ai-slop-runpod-check.
+
+## Etap 13 — TTS i ElevenLabs
+
+TTSProvider przyjmuje typowany TTSRequest (tekst, voice_id, język, VoiceSettings)
+i zwraca TTSResult z bajtami, MIME, opcjonalnymi alignment/normalized_alignment
+oraz metadanymi użycia. Mock tworzy poprawny, cichy WAV 16 kHz z przybliżonymi
+czasami; ElevenLabsProvider używa httpx, with-timestamps i MP3 44.1 kHz / 128 kbps.
+Model, głos, timeout, limit odpowiedzi i wysyłanie language_code są konfigurowalne.
+Sekret pochodzi z pydantic-settings. Adapter jest dostępny przez app.state.tts.
+
+Usługa generate_scene_audio jest wewnętrzna i synchroniczna, przeznaczona do
+podpięcia do workerów. Przed zewnętrznym wywołaniem sprawdza ownership i scenę,
+blokuje Video oraz zapisuje running GenerationJob i CostEvent. Fingerprint wejścia
+zapewnia replay gotowego wyniku; running/failed blokują automatyczne ponowienie.
+Nie zmienia statusu Video — kolejność workflow zostaje dla etapu 14.
+
+CostEvent (migracja 0011) zapisuje provider, operację, model, film, kanał, job,
+estimated_cost_usd, nullable actual_cost_usd, metadane i czas. Osobny adapter pricing
+liczy estymację z jawnej stawki operatora na 1000 znaków; brak stawki blokuje usługę
+live. Zwrócone character-cost i request-id są zapisywane przed operacją storage.
+Raportowana liczba znaków nie jest rachunkiem w USD; actual_cost_usd pozostaje null
+w live, a w mock wynosi zero. Nie wdrażamy jeszcze silnika budżetów z etapu 19.
+
+Audio jest zapisywane przez StorageProvider pod stabilnym kluczem joba. Asset
+zawiera sumę kontrolną, rozmiar i timestampy; completion joba i Asset to jedna
+transakcja DB. Błąd metadanych powoduje próbę usunięcia pliku, zachowując zapis
+kosztu. Błąd providera pozostawia job failed i szacunek kosztu do rozstrzygnięcia.
+Nie ma transakcji obejmującej system zewnętrzny i DB. Restart może pozostawić
+running lub osierocony obiekt; dalsze recovery nie może ślepo powtarzać płatnego TTS.
+
+Adapter nie ponawia POST automatycznie, ma ograniczony timeout i rozmiar odpowiedzi,
+nie podąża za redirectami i zwraca bezpieczne błędy. Waliduje base64, podstawowy
+nagłówek MP3 i tablice alignment. Pełne dekodowanie/quality control to późniejszy
+etap. Nie dodano publicznych endpointów ani pobierania plików bez autoryzacji.
+
+### Weryfikacja etapu 13 — 2026-09-28
+
+255 testów przeszło bez pominięć z PostgreSQL, Redis i SeaweedFS (26 nowych).
+Sprawdzono kontrakt ElevenLabs przez MockTransport, błędy/timeouty/limity, brak
+ponowień, optional alignment/language, sekrety z .env, poprawny WAV, ownership,
+replay, koszt szacowany vs actual, zachowanie użycia po błędzie storage, konkurencję,
+rollback Asset ze sprzątaniem pliku, kaskady i migrację zgodną z SQLModel.
+Ruff i formatowanie poprawne. Kontener API osiągnął healthy. Nie wykonano
+płatnych wywołań ElevenLabs. Następny etap: Async Workers (14).
+
+Końcowy test kontenera potwierdził HTTP /health, /ready i /docs oraz przepływ:
+rejestracja → kanał → STORY → scena → mock TTS → WAV w SeaweedFS → CostEvent.
+Ponowne wywołanie zwróciło ten sam Asset. Weryfikacja używała wyłącznie izolowanego
+stosu ai-slop-tts-check, usuwanego po testach.

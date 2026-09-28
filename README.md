@@ -236,10 +236,10 @@ Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
 
 
-## TODO po etapie 12
+## TODO po etapie 13
 
-- Etap 13: TTSProvider i ElevenLabs (mock/live).
-- Etapy 14–16: Dramatiq, trwała orkiestracja generowania, FFmpeg i kontrola jakości.
+- Etap 14: Dramatiq, kolejki, trwała orkiestracja generowania i recovery.
+- Etapy 15–16: FFmpeg i kontrola jakości.
 - Etapy 17–20: scheduler, panelowe API, budżety i rozszerzona obserwowalność.
 
 Na tym etapie nie ma workerów ani schedulera do uruchomienia, pełnego video
@@ -1032,3 +1032,116 @@ obecnym czterostanowym enumem GenerationJob bez jawnego mapowania.
 Testy `tests/unit/test_runpod.py` obejmują mock, kontrakt HTTP adaptera live,
 konfigurację, błędy, ograniczenia i retries. Transport HTTP jest zastąpiony
 `httpx.MockTransport`; testy nie uruchamiają GPU ani nie wymagają konta Runpod.
+
+## Etap 13 — ElevenLabs i audio scen
+
+`TTSProvider.synthesize(TTSRequest)` przyjmuje tekst (maks. 4000 znaków), voice_id,
+język `pl/en` i ustawienia głosu. Zwraca `TTSResult`: bajty audio, MIME, opcjonalne
+alignment/normalized_alignment, ID wywołania i raportowaną liczbę rozliczonych znaków.
+Modele są walidowane przez Pydantic; tablice timestampów muszą mieć zgodne długości,
+nieujemne czasy i uporządkowane początki. Audio nie trafia do serializacji JSON wyniku.
+
+`MockTTSProvider` działa bez sieci, generuje poprawny **cichy WAV PCM mono 16 kHz**
+i przybliżone timestampy. To materiał testowy do pipeline’u, nie lektor ani model
+mowy. Wynik mocka ma koszt zero. `ElevenLabsProvider` używa httpx i endpointu
+with-timestamps, dekoduje base64 oraz zwraca MP3 44.1 kHz / 128 kbps.
+[API ElevenLabs](https://elevenlabs.io/docs/api-reference/text-to-speech/convert-with-timestamps).
+
+### Konfiguracja
+
+Wybór providera przez `EXTERNAL_PROVIDERS_MODE=mock/live`. FastAPI udostępnia go
+jako `app.state.tts` i zamyka klienta HTTP przy shutdown. Sam start nie generuje mowy.
+
+| Zmienna .env | Znaczenie / domyślnie |
+| --- | --- |
+| `ELEVENLABS_API_KEY` | SecretStr, wymagany do wywołania live |
+| `ELEVENLABS_MODEL` | model obsługujący TTS, wymagany w live |
+| `ELEVENLABS_VOICE_ID` | głos domyślny; można przekazać głos do usługi |
+| `ELEVENLABS_TIMEOUT_SECONDS` | 60 s |
+| `ELEVENLABS_MAX_RESPONSE_BYTES` | 16777216, limit JSON z base64 |
+| `ELEVENLABS_SEND_LANGUAGE_CODE` | true; ustaw false, jeśli model nie przyjmuje language_code |
+| `TTS_USD_PER_1000_CHARACTERS` | własna stawka do estymacji; brak wartości blokuje usługę audio live |
+
+Nie ma domyślnego cennika ElevenLabs. Stawkę ustala operator według swojej umowy
+i modelu. Wartość jest szacunkiem na 1000 znaków wejścia, nie konwersją kredytów
+ani potwierdzoną kwotą rachunku. Parametry są przekazywane przez Compose.
+Globalny tryb live nadal wymaga konfiguracji istniejącego adaptera OpenAI.
+
+VoiceSettings udostępnia stability, similarity_boost i speed. Zgodność głosu,
+modelu i ustawień trzeba sprawdzić dla własnego konta. Adapter ogranicza rozmiar
+odpowiedzi, sprawdza nagłówek MP3, nie podąża za redirectami i nie loguje treści
+odpowiedzi. Pełne dekodowanie i jakość dźwięku należą do późniejszego quality control.
+
+### Zapis assetu i kosztu
+
+Wewnętrzna usługa `app.modules.audio.service.generate_scene_audio()`:
+
+1. Sprawdza właściciela filmu i przynależność sceny; pobiera narrację z bazy.
+2. Pod blokadą Video tworzy GenerationJob i CostEvent, zatwierdzając je przed TTS.
+3. Wywołuje provider i zapisuje raportowane użycie, zanim rozpocznie zapis pliku.
+4. Zapisuje plik przez StorageProvider, następnie Asset typu audio z timestampami
+   i status succeeded w jednej transakcji DB.
+
+Fingerprint tekstu, głosu, języka, ustawień, modelu i providera jest kluczem
+idempotencji w scenie. Gotowy wynik jest zwracany ponownie bez drugiego wywołania.
+Istniejący running/failed daje AudioConflict; usługa nie uruchamia automatycznie
+kolejnego płatnego wywołania. Nowe parametry oznaczają osobne zadanie.
+Usługa samodzielnie zatwierdza transakcje — przekazuj jej osobną sesję bez innych
+niezatwierdzonych zmian. Nie podłączono jej jeszcze do publicznego endpointu HTTP.
+
+Przykład wewnętrznego użycia dla istniejącej sceny (UUID właściciela, filmu i sceny):
+
+```python
+from sqlmodel import Session
+from app.core.config import get_settings
+from app.db.session import get_engine
+from app.integrations.elevenlabs.factory import create_tts_provider
+from app.integrations.storage.factory import create_storage_provider
+from app.modules.audio.service import generate_scene_audio
+
+settings = get_settings()
+tts = create_tts_provider(settings)
+storage = create_storage_provider(settings)
+try:
+    with Session(get_engine(), expire_on_commit=False) as db:
+        asset = generate_scene_audio(db, owner_id, video_id, scene_id, tts, storage, settings)
+finally:
+    tts.close()
+    storage.close()
+```
+
+Konfiguracja storage musi odpowiadać przekazanemu adapterowi. Lokalnie powstaje
+plik w data/assets, w Compose w prywatnym bucketcie SeaweedFS. Nie dodano
+publicznego dostępu do plików ani endpointu omijającego JWT. Video zachowuje swój
+status; etap workerów będzie decydował o kolejności generowania i zmianach statusu.
+
+Migracja `0011` dodaje SQLModel `CostEvent`: provider, operation, model, video_id,
+channel_id, generation_job_id, estimated_cost_usd, nullable actual_cost_usd,
+metadata_json i created_at. Estymator jest oddzielony od usługi audio.
+Raportowany nagłówek `character-cost` i `request-id` zapisujemy w metadanych.
+`actual_cost_usd` w live pozostaje null, ponieważ liczba rozliczonych znaków nie
+jest kwotą w USD. Jeśli nagłówek jest niedostępny, billed_characters jest null.
+[Metadane użycia ElevenLabs](https://elevenlabs.io/docs/api-reference/introduction).
+
+Przy timeout/5xx lub niepoprawnej odpowiedzi wynik może być nieznany, a operacja
+mogła zostać rozliczona. POST nie jest automatycznie ponawiany, również po 429.
+Koszt szacowany pozostaje zapisany; nie zakładamy, że błąd oznacza darmowe wywołanie.
+Po błędzie storage zachowujemy zgłoszone użycie. Przy błędzie zapisu Asset próbujemy
+usunąć plik i oznaczamy job jako failed bez surowego komunikatu dostawcy.
+
+Nie ma transakcji obejmującej jednocześnie provider, storage i DB. Awaria procesu
+może zostawić running lub osierocony plik; odzyskiwanie musi być jawne, bez ślepego
+ponawiania TTS. Usuwanie kanału usuwa metadane i koszty przez kaskadę; pliki nadal
+wymagają sprzątania. Pełne budget enforcement i raportowanie kosztów to etap 19.
+
+Uruchomienie i migracja:
+
+```sh
+docker compose up -d --build
+# Alternatywnie poza Dockerem:
+uv run --no-active alembic upgrade head
+```
+
+Testy TTS i zapisu audio są w `tests/unit/test_tts.py` oraz
+`tests/integration/test_audio_storage.py`. Testy adaptera live korzystają z
+MockTransport, bez połączeń do ElevenLabs i bez kosztów GPU/TTS.
