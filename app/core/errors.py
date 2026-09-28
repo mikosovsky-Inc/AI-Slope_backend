@@ -15,6 +15,8 @@ from app.modules.competitors.service import (
 )
 from app.modules.ideas.service import IdeaConflict, IdeaNotFound, IdeasNotReady
 from app.modules.intelligence.service import AnalysisConflict
+from app.modules.research.provider import ResearchUnavailable as FactResearchUnavailable
+from app.modules.research.service import InsufficientResearch, ResearchStateConflict
 from app.modules.scripts.service import ScriptConflict, ScriptNotFound
 from app.modules.videos.service import VideoRequiresApprovedIdea
 from app.shared.llm import LLMError, LLMRefusal, LLMUnavailable
@@ -98,7 +100,18 @@ async def script_error(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=status, content={"detail": message})
 
 
+async def fact_research_error(request: Request, exc: Exception) -> JSONResponse:
+    status, message = {
+        InsufficientResearch: (422, "Insufficient sourced facts; generation stopped"),
+        ResearchStateConflict: (409, "TOP5 workflow is not ready for this operation"),
+        FactResearchUnavailable: (503, "Research provider unavailable"),
+    }[type(exc)]
+    return JSONResponse(status_code=status, content={"detail": message})
+
+
 def register_error_handlers(app: FastAPI) -> None:
+    for error in (InsufficientResearch, ResearchStateConflict, FactResearchUnavailable):
+        app.add_exception_handler(error, fact_research_error)
     app.add_exception_handler(ScriptNotFound, script_error)
     app.add_exception_handler(ScriptConflict, script_error)
     app.add_exception_handler(VideoRequiresApprovedIdea, video_not_ready)

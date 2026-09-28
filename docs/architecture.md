@@ -339,3 +339,37 @@ FAILED po błędach, brak częściowych skryptów, równoległy request 409 oraz
 błędu zapisu scen na PostgreSQL. Migracje odpowiadają metadanym. Ruff i formatowanie
 poprawne. Test HTTP kontenera przeszedł od kanału i idei do skryptu, odczytu,
 replay i SCRIPT_READY. Wyłącznie mock, bez płatnych calli. Następny etap: TOP5 Research Engine (9).
+
+## Etap 9 — research TOP5 i przypisanie źródeł
+
+ResearchProvider jest oddzielony od LLMProvider i od benchmarków konkurencji.
+Lokalny adapter pracuje na jawnym korpusie, domyślnie pustym. Zewnętrznej wyszukiwarki
+nie podłączono. Moduł research generuje zapytania, waliduje dokumenty i wymaga
+cytatów występujących dosłownie w przekazanym źródle. Nie akceptuje URL/tytułów
+wymyślonych przez ekstraktor — przypisuje je z dokumentów po zweryfikowanym ID.
+
+Migracja 0008 dodaje ResearchDocument, ResearchFact i SceneResearchFact. Własność
+wynika z Video → ContentIdea → Channel. Dokumenty są unikalne per video/URL,
+fakty deduplikowane po znormalizowanej treści, cytowania wskazują konkretne sceny.
+Dla kontynuacji potrzeba 5 faktów o confidence >= .7 z minimum 2 dokumentów.
+Nie oznacza to niezależnego fact-checkingu; confidence jest heurystyką modelu.
+
+Research i zapis scenariusza to osobne jawne akcje. Każda claimuje status filmu
+pod FOR UPDATE, zwalnia transakcję przed providerem i zapisuje efekt atomowo.
+Niewystarczające poprawne dane pozostają do audytu przy FAILED. Nieprawidłowe cytaty
+powodują odrzucenie paczki. Skrypt wybiera 5 ID tylko z researchu danego Video;
+serwer wstawia dokładne statements jako narrację. Model tworzy wyłącznie kolejność,
+czasy i prompty. Zapis skryptu, scen, cytowań i SCRIPT_READY to jedna transakcja.
+Ukończone operacje są odczytywane bez ponownego generowania. Błędy zachowują research,
+ale nie częściowy skrypt. Wspólny GET /script zwraca wariant STORY lub TOP5.
+
+### Weryfikacja etapu 9 — 2026-09-28
+
+163 testy przeszły bez pominięć z PostgreSQL i Redis (12 nowych). Sprawdzono
+pełny research → fakty → TOP5 → cytowania → SCRIPT_READY na jawnym korpusie testowym,
+replay, auth/ownership, niewystarczające źródła, wymyślone cytaty/ID, niepoprawny plan,
+czas, konkurencję, rollback błędu zapisu cytowania i kaskady. Migracje są zgodne
+z metadanymi. Ruff i formatowanie poprawne. Docker osiągnął healthy; test HTTP
+potwierdził 422 i FAILED dla pustego korpusu oraz brak możliwości wygenerowania
+scenariusza bez źródeł. Nie wykonano realnego web search ani płatnych calli.
+Następny etap: Director (10).

@@ -8,6 +8,7 @@ from sqlmodel import Session, select
 
 from app.modules.channels.models import Channel
 from app.modules.ideas.models import ContentFormat, ContentIdea
+from app.modules.research.schemas import Top5ScriptRead
 from app.modules.scripts.schemas import ScriptRead, StoryNarrative, StoryOutline, StoryScenes
 from app.modules.videos.models import Scene, Video, VideoScript, VideoStatus
 from app.modules.videos.schemas import SceneInput, ScriptInput
@@ -57,11 +58,15 @@ def read_script(db: Session, script: VideoScript) -> ScriptRead:
     )
 
 
-def get_script(db: Session, owner_id: UUID, video_id: UUID) -> ScriptRead:
-    owned_video(db, owner_id, video_id)
+def get_script(db: Session, owner_id: UUID, video_id: UUID) -> ScriptRead | Top5ScriptRead:
+    video = owned_video(db, owner_id, video_id)
     script = db.exec(select(VideoScript).where(VideoScript.video_id == video_id)).one_or_none()
     if script is None:
         raise ScriptNotFound
+    if video.format == ContentFormat.TOP5:
+        from app.modules.research.service import read_top5_script
+
+        return read_top5_script(db, script)
     return read_script(db, script)
 
 

@@ -236,9 +236,8 @@ Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
 
 
-## TODO po etapie 8
+## TODO po etapie 9
 
-- Etap 9: research faktów i scenariusze TOP5 oparte na źródłach.
 - Etap 10: Director i dobór wizualizacji.
 - Etapy 11–16: SeaweedFS, adaptery GPU/TTS, Dramatiq, FFmpeg i kontrola jakości.
 - Etapy 17–20: scheduler, panelowe API, budżety i rozszerzona obserwowalność.
@@ -662,3 +661,78 @@ Migracja `0007` dodaje do video_scripts JSON `outline` i `story`, zachowując st
 rekordy z pustymi obiektami. Istniejące etapy nie tworzyły skryptów przez API;
 puste rekordy wprowadzone ręcznie nie stanowią prawidłowego scenariusza STORY.
 Compose stosuje migrację przy starcie. Lokalnie: `uv run --no-active alembic upgrade head`.
+
+## Etap 9 — TOP5 Research Engine
+
+Po utworzeniu Video z zatwierdzonego pomysłu TOP5:
+
+```sh
+curl --fail-with-body -X POST \
+  "http://localhost:8000/api/v1/videos/$VIDEO_ID/research" \
+  -H "Authorization: Bearer $TOKEN"
+curl --fail-with-body \
+  "http://localhost:8000/api/v1/videos/$VIDEO_ID/research" \
+  -H "Authorization: Bearer $TOKEN"
+curl --fail-with-body -X POST \
+  "http://localhost:8000/api/v1/videos/$VIDEO_ID/top5-script/generate" \
+  -H "Authorization: Bearer $TOKEN"
+curl --fail-with-body \
+  "http://localhost:8000/api/v1/videos/$VIDEO_ID/script" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Endpointy wymagają JWT właściciela; cudzy/nieistniejący film daje 404. POST-y nie
+przyjmują body, sukces daje 200. Research działa tylko dla TOP5 w IDEA_GENERATED,
+a scenariusz dopiero po RESEARCHED. Niewłaściwy format/stan lub równoległy request
+daje 409. Brak danych daje 422 i FAILED; nie generujemy wtedy scenariusza.
+Ponowienie ukończonego researchu w RESEARCHED/SCRIPT_READY oraz gotowego skryptu
+zwraca zapisany wynik bez ponownego wywołania providerów.
+
+Pipeline:
+
+1. LLM tworzy 1–5 zapytań na podstawie tematu, konceptu i języka.
+2. ResearchProvider dostarcza dokumenty; zapisujemy maksymalnie 6 unikalnych URL,
+   każdy do 8000 znaków, w języku filmu.
+3. LLM wybiera do 30 cytowanych stwierdzeń i identyfikatory dokumentów. Serwer
+   odrzuca nieznane ID i cytaty, które nie występują dosłownie w danym dokumencie.
+4. Fakty z confidence >= 0.7 są deduplikowane po treści. Warunek kontynuacji:
+   minimum 5 różnych faktów z co najmniej 2 dokumentów o różnych URL.
+5. LLM wybiera kolejność pięciu zapisanych faktów, czasy i prompty. Narracja każdej
+   sceny jest wstawiana przez serwer z ResearchFact.statement — model nie może
+   dodać twierdzeń z pamięci. Pierwsza scena to neutralne „Pięć faktów.” / „Five facts.”.
+
+Kolejność jest redakcyjna, nie obiektywnym rankingiem. Czasy scen mają sumować się
+w tolerancji ±10% celu. Skrypt ma sześć scen (hook + pięć faktów) oraz `citations`,
+które łączą pozycję sceny z pełnym faktem i źródłem. GET /script obsługuje teraz
+STORY i TOP5. Endpoint /script/generate pozostaje generatorem STORY.
+
+ResearchDocument zapisuje URL, tytuł, fragment dokumentu, metadane i czas pobrania.
+ResearchFact zapisuje statement, source_url, source_title, confidence i metadata_json
+(cytat i zapytania). SceneResearchFact utrwala powiązanie sceny z faktem.
+Niewystarczający research z poprawnymi dokumentami/faktami zostaje zachowany do
+inspekcji przez GET /research, ale film przechodzi do FAILED. Nieprawidłowe wyniki
+nie są zapisywane jako fakty. Błąd zapisu skryptu/cytowań wycofuje skrypt i sceny,
+zachowując wcześniejszy research, i ustawia FAILED z bezpiecznym kodem.
+
+**Domyślny LocalResearchProvider jest pusty, także w live.** Nie ma jeszcze adaptera
+wyszukiwarki ani pobierania stron. Domyślny POST /research zakończy się więc 422,
+zamiast wymyślać źródła. Aby dostarczyć własny, jawny korpus, wstrzyknij
+`LocalResearchProvider(list[SourceDocument])` przez zależność `get_research_provider`.
+Przykład integracji i dane testowe są w tests/conftest.py oraz test_top5_research.py.
+Przyszły adapter implementuje `search(ResearchQuery)` i powinien zapewniać timeout,
+ograniczone retries i mapować niedostępność na ResearchUnavailable. URL nie jest
+pobierany przez serwis domenowy. Mock LLM wybiera linie z przekazanego korpusu;
+nie tworzy fikcyjnych dokumentów ani adresów.
+
+Confidence jest heurystyką dopasowania/wsparcia, nie dowodem prawdziwości.
+Weryfikujemy pochodzenie cytatu, lecz nie wiarygodność wydawcy, kompletność kontekstu
+ani semantyczną prawdziwość zdania. Dwa różne URL nie gwarantują niezależności źródeł.
+Ta wersja używa cytatów zamiast swobodnych parafraz, aby mechanicznie ograniczyć
+narrację do dostarczonych danych. Dobór zaufanego korpusu pozostaje odpowiedzialnością
+adaptera/operatora. Nie jest to automatyczny fact-checking internetu.
+
+Przejścia: IDEA_GENERATED → RESEARCHING → RESEARCHED → SCRIPTING → SCRIPT_READY.
+Claim statusu jest trwały przed zewnętrznym wywołaniem; nie trzymamy wtedy blokad DB.
+Tak jak STORY, przerwanie procesu może wymagać recovery planowanego w etapie 14.
+Nie ma automatycznego retry FAILED. Migracja `0008` dodaje encje i kaskady; Compose
+wykonuje ją przy starcie. Lokalnie: `uv run --no-active alembic upgrade head`.

@@ -13,11 +13,16 @@ def create_llm_provider(settings: Settings) -> LLMProvider:
         from app.modules.ideas.schemas import GeneratedIdeas
         from app.modules.intelligence.mock import mock_analysis
         from app.modules.intelligence.schemas import ChannelAnalysis
+        from app.modules.research.mock import mock_facts, mock_queries, mock_top5
+        from app.modules.research.schemas import ExtractedFacts, ResearchQueries, Top5Plan
         from app.modules.scripts.mock import mock_beats, mock_scenes
         from app.modules.scripts.schemas import StoryNarrative, StoryOutline, StoryScenes
 
         return MockLLMProvider(
             {
+                ResearchQueries: mock_queries,
+                ExtractedFacts: mock_facts,
+                Top5Plan: mock_top5,
                 ChannelAnalysis: mock_analysis,
                 GeneratedIdeas: mock_ideas,
                 StoryOutline: mock_beats,
