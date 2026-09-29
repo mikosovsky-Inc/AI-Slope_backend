@@ -47,8 +47,20 @@ async def unavailable_error(request: Request, exc: Exception) -> JSONResponse:
 
 
 async def unexpected_error(request: Request, exc: Exception) -> JSONResponse:
-    logger.error("Unhandled application error", extra={"error_type": type(exc).__name__})
-    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+    request_id = getattr(request.state, "request_id", "")
+    logger.error(
+        "Unhandled application error",
+        extra={
+            "error_type": type(exc).__name__,
+            "request_id": request_id,
+            "error_category": "internal",
+        },
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+        headers={"X-Request-ID": request_id},
+    )
 
 
 async def channel_not_found(request: Request, exc: ChannelNotFound) -> JSONResponse:

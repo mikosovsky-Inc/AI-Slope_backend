@@ -73,6 +73,8 @@ class Task(Base, table=True):
     checkpoint: dict = Field(default_factory=dict, sa_type=JSON)
     result: dict | None = Field(default=None, sa_type=JSON)
     error: str | None = Field(default=None, max_length=100)
+    request_id: str | None = Field(default=None, max_length=64)
+    error_category: str | None = Field(default=None, max_length=40)
     attempts: int = Field(default=0)
     max_attempts: int = Field(default=3)
     run_token: UUID | None = None

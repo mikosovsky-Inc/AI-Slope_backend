@@ -11,6 +11,7 @@ from app.api.routes.health import router as health_router
 from app.core.config import get_settings
 from app.core.errors import register_error_handlers
 from app.core.logging import configure_logging
+from app.core.observability import RequestLoggingMiddleware
 from app.core.redis import create_redis_client
 from app.db.session import get_engine
 from app.integrations.elevenlabs.factory import create_tts_provider
@@ -54,8 +55,10 @@ class APICORSMiddleware(CORSMiddleware):
             app,
             allow_origins=get_settings().cors_allowed_origins,
             allow_methods=["GET", "POST", "PATCH", "DELETE"],
-            allow_headers=["Authorization", "Content-Type"],
+            allow_headers=["Authorization", "Content-Type", "X-Request-ID", "Idempotency-Key"],
+            expose_headers=["X-Request-ID", "Location"],
         )
 
 
 app.add_middleware(APICORSMiddleware)
+app.add_middleware(RequestLoggingMiddleware)

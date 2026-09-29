@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi import Depends, Request
 
 from app.core.config import Settings
+from app.core.observability import ObservedProvider
 from app.integrations.llm.mock import MockLLMProvider
 from app.shared.llm import LLMProvider
 
@@ -45,7 +46,7 @@ def create_llm_provider(settings: Settings) -> LLMProvider:
 
 
 def get_llm_provider(request: Request) -> LLMProvider:
-    return request.app.state.llm
+    return ObservedProvider(request.app.state.llm, "llm")
 
 
 CurrentLLM = Annotated[LLMProvider, Depends(get_llm_provider)]

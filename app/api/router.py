@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from app.api.routes.admin import router as admin_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.channels import router as channels_router
 from app.api.routes.director import router as director_router
@@ -30,3 +31,4 @@ router.include_router(render_router)
 
 router.include_router(quality_router)
 router.include_router(panel_router)
+router.include_router(admin_router)

@@ -369,6 +369,7 @@ def retry(db: Session, owner_id: UUID, video_id: UUID, task_id: UUID) -> TaskRea
     now = datetime.now(UTC)
     task.checkpoint = task.checkpoint | {"panel_retries": count + 1}
     task.status, task.error, task.completed_at = TaskStatus.QUEUED, None, None
+    task.error_category = None
     task.available_at = task.delivery_after = now
     task.run_token = None
     task.max_attempts = min(10, max(task.max_attempts, task.attempts + 1))

@@ -1,6 +1,7 @@
 import logging
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -8,13 +9,14 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session, select
 
 from app.core.config import get_settings
+from app.core.observability import categorize_error, log_context
 from app.models.user import User
 from app.modules.audio.service import AudioConflict
 from app.modules.costs.service import BudgetExceeded
 from app.modules.quality.provider import VisualQualityUnavailable
 from app.modules.quality.service import QualityPending, enqueue_quality
 from app.modules.render.engine import RenderError
-from app.modules.tasks.models import Task, TaskKind, TaskStatus
+from app.modules.tasks.models import QUEUES, Task, TaskKind, TaskStatus
 from app.modules.tasks.service import enqueue
 from app.shared.generation import GenerationSubmissionUnknown, GenerationUnavailable
 from app.shared.storage import StorageError
@@ -43,6 +45,34 @@ def execution_lock(engine, task_id: UUID):
 
 
 def run_task(engine, task_id: str, *, settings=None) -> None:
+    with Session(engine) as db:
+        task = db.get(Task, UUID(task_id))
+        if task is None:
+            return
+        fields = {
+            "request_id": task.request_id or f"task-{task.id}",
+            "task_id": str(task.id),
+            "task_kind": task.kind.value,
+            "queue": QUEUES[task.kind],
+            "video_id": str(task.video_id) if task.video_id else None,
+            "channel_id": str(task.channel_id) if task.channel_id else None,
+            "scene_id": str(task.scene_id) if task.scene_id else None,
+        }
+    start = perf_counter()
+    with log_context(**fields):
+        try:
+            _run_task(engine, task_id, settings=settings)
+        finally:
+            logger.info(
+                "Worker invocation completed",
+                extra={
+                    "event": "worker_execution",
+                    "duration_ms": round((perf_counter() - start) * 1000, 3),
+                },
+            )
+
+
+def _run_task(engine, task_id: str, *, settings=None) -> None:
     settings = settings or get_settings()
     identifier = UUID(task_id)
     with execution_lock(engine, identifier) as acquired:
@@ -70,6 +100,7 @@ def run_task(engine, task_id: str, *, settings=None) -> None:
             user = db.get(User, task.owner_id)
             if user is None or not user.is_active:
                 task.status, task.error = TaskStatus.FAILED, "owner_unavailable"
+                task.error_category = "authorization"
                 task.completed_at = now
                 db.add(task)
                 db.commit()
@@ -105,6 +136,7 @@ def run_task(engine, task_id: str, *, settings=None) -> None:
                     return
                 task.result, task.status = result, TaskStatus.SUCCEEDED
                 task.completed_at, task.error = datetime.now(UTC), None
+                task.error_category = None
                 # Complete parent and enqueue child atomically; no broker send in this transaction.
                 next_kind = {
                     TaskKind.RESEARCH: TaskKind.TOP5,
@@ -126,11 +158,21 @@ def run_task(engine, task_id: str, *, settings=None) -> None:
                     task.result = task.result | {"quality_task_id": str(quality_task.id)}
                 db.add(task)
                 db.commit()
+                logger.info(
+                    "Task completed", extra={"event": "task_completed", "status": task.status.value}
+                )
             except Exception as exc:
                 db.rollback()
                 task = db.get(Task, identifier)
                 if task is None or task.run_token != token:
                     return
+                task.error_category = (
+                    "pending"
+                    if isinstance(exc, (PollLater, QualityPending))
+                    else "review_required"
+                    if isinstance(exc, (ReviewRequired, AudioConflict))
+                    else categorize_error(exc).value
+                )
                 if isinstance(exc, BudgetExceeded):
                     task.status, task.error = TaskStatus.FAILED, "budget_exceeded"
                 elif isinstance(exc, QualityPending):
@@ -151,6 +193,7 @@ def run_task(engine, task_id: str, *, settings=None) -> None:
                         milliseconds=settings.runpod_job_ttl_ms
                     ):
                         task.status, task.error = TaskStatus.NEEDS_REVIEW, "provider_poll_deadline"
+                        task.error_category = "timeout"
                     else:
                         task.status = TaskStatus.QUEUED
                         task.available_at = datetime.now(UTC) + timedelta(seconds=5)
@@ -196,5 +239,12 @@ def run_task(engine, task_id: str, *, settings=None) -> None:
                 db.commit()
                 logger.warning(
                     "Task execution stopped",
-                    extra={"task_id": str(identifier), "status": task.status.value},
+                    extra={
+                        "task_id": str(identifier),
+                        "status": task.status.value,
+                        "event": "task_stopped",
+                        "error_category": task.error_category,
+                        "error_type": type(exc).__name__,
+                        "attempts": task.attempts,
+                    },
                 )

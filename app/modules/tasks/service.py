@@ -3,6 +3,7 @@ from uuid import UUID, uuid4
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
+from app.core.observability import context
 from app.models.user import User
 from app.modules.channels.service import owned_channel
 from app.modules.scripts.service import owned_video
@@ -72,6 +73,7 @@ def enqueue(
                 scene_id=scene_id,
                 parameters=parameters or {},
                 idempotency_key=idempotency_key,
+                request_id=context.get().get("request_id"),
             )
             db.add(task)
             db.flush()

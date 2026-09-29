@@ -4,6 +4,7 @@ from uuid import UUID
 from sqlmodel import Session, select
 
 from app.core.config import Settings
+from app.core.observability import ObservedProvider
 from app.integrations.elevenlabs.factory import create_tts_provider
 from app.integrations.llm.factory import create_llm_provider
 from app.integrations.runpod.factory import create_generation_provider
@@ -39,7 +40,7 @@ def execute_operation(db: Session, task: Task, settings: Settings) -> dict:
     def managed(stack, factory):
         provider = factory(settings)
         stack.callback(provider.close)
-        return provider
+        return ObservedProvider(provider, factory.__name__.removeprefix("create_"))
 
     if task.parameters.get("scheduler_plan_id"):
         from app.modules.scheduler.service import scheduled_task_skip_reason

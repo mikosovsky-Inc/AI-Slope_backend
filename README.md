@@ -4,7 +4,7 @@ FastAPI + PostgreSQL, schematy API Pydantic, konfiguracja `pydantic-settings`,
 hasła Argon2id i tokeny dostępu JWT (HS256). Modele bazy i sesje korzystają z SQLModel (opartego na SQLAlchemy i Pydantic),
 a migracje z Alembic. E-maile są zapisywane małymi literami i unikalne.
 
-## Stan projektu — etapy 1–19
+## Stan projektu — etapy 1–20
 
 Modularny monolit FastAPI z JWT, PostgreSQL/SQLModel, Redis i SeaweedFS.
 Działa analiza kanału, pomysły, scenariusze STORY/TOP5, Director, adaptery
@@ -243,10 +243,10 @@ Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
 
 
-## TODO po etapie 19
+## TODO po etapie 20
 
 - Rozszerzona edycja gotowych filmów z wersjonowaniem assetów i ręczne odzyskiwanie niepewnych zadań.
-- Etap 20: rozszerzona obserwowalność.
+- Integracja z zewnętrznym systemem telemetrii (np. Sentry/Prometheus), jeśli będzie potrzebna.
 - Automatyczne połączenie Directora z generowaniem assetów i pierwszym renderem; seed/demo.
 
 Worker, dispatcher i scheduler są uruchamiane w Compose. Nie ma jeszcze polecenia seed/demo.
@@ -1715,4 +1715,86 @@ utrwalonemu manifestowi. Jeśli również obraz przekracza dostępny budżet,
 żadne nowe wywołanie nie jest wykonywane.
 
 Aktualizacja: `docker compose up -d --build` uruchamia migrację `0016`.
-W trybie live ustaw wcześniej stawki w `.env`. Etap 20 nie został rozpoczęty.
+W trybie live ustaw wcześniej stawki w `.env`. Obserwowalność opisuje etap 20 poniżej.
+
+## Etap 20 — obserwowalność
+
+Aplikacja zapisuje logi JSON z czasem UTC, poziomem, nazwą loggera i zdarzeniem.
+Formatter zachowuje jawnie dozwolone pola: `request_id`, `task_id`, `video_id`,
+`channel_id`, `scene_id`, `task_kind`, statusy, kategorię błędu i `duration_ms`.
+Nie serializuje dowolnych obiektów `extra`, treści wyjątków, promptów, nagłówków
+autoryzacji, parametrów SQL ani wyników generacji.
+
+### Żądanie → zadanie → provider
+
+Każda odpowiedź HTTP otrzymuje `X-Request-ID`, również odpowiedzi 401/404/422/500.
+Możesz wysłać własny identyfikator (1–64 znaków ASCII: litery, cyfry, `_`, `-`);
+niepoprawny lub brakujący nagłówek zostaje zastąpiony losowym UUID hex. Nagłówek
+jest dostępny dla przeglądarki przez CORS, podobnie jak `Location`.
+CORS dopuszcza także `Idempotency-Key`.
+
+Przy zleceniu zadania jego `request_id` zostaje zapisany w PostgreSQL
+(migracja `0017`). Worker odtwarza kontekst i przekazuje go kolejnym zadaniom
+workflow, również po restarcie. Replay tego samego zadania zachowuje pierwotne
+powiązanie, niezależnie od nowego ID żądania HTTP. Dla starych zadań i zadań
+schedulera bez HTTP worker używa w logach `task-<UUID>`; pole oryginalnego
+zadania w bazie może nadal być null. Kontekst jest izolowany między żądaniami
+i wątkami oraz sprzątany po zakończeniu.
+
+Zdarzenia:
+
+- `http_request`: metoda, szablon trasy, status i czas obsługi HTTP; bez query
+  string i surowej ścieżki dla nieznanych tras. Zastępuje access log Uvicorna.
+- `provider_call`: rodzaj providera, nazwa adaptera (`provider_type`), operacja,
+  wynik i czas jednego wywołania adaptera. Dotyczy LLM, Runpod i TTS używanych
+  przez API/workery oraz operacji storage wykonywanych przez opakowany provider.
+  Czas obejmuje wewnętrzne retry adaptera; polling jest osobnym wywołaniem,
+  a nie pomiarem całego czasu pracy GPU.
+- `worker_execution`: czas pojedynczego wywołania workera, bez oczekiwania
+  w kolejce. `task_completed` i `task_stopped` opisują wynik kroku.
+
+`error_category` odróżnia budżet, timeout, zależności, providera, nieprawidłowy
+output, walidację, render, potrzebę weryfikacji i błąd wewnętrzny. `pending`
+oznacza oczekiwanie na polling/naprawę, nie awarię. HTTP klasyfikuje też błędy
+uprawnień, brak zasobu i konflikty stanu. Kategoria ostatniej próby jest zapisana
+w Task, a po sukcesie lub ręcznym retry jest czyszczona. Stare zadania mogą mieć
+kategorię null. Klasyfikacja bazuje na bezpiecznych typach wyjątków, nie analizie
+ich treści; błąd timeout ukryty przez adapter jako ogólna niedostępność pozostanie
+kategorią providera.
+
+```sh
+docker compose logs --no-log-prefix api worker dispatcher scheduler
+curl -H "Authorization: Bearer $TOKEN" -H 'X-Request-ID: local-check-1' \
+  http://localhost:8000/api/v1/dashboard
+```
+
+### Panel administratora
+
+`GET /api/v1/admin/jobs` wymaga aktywnego użytkownika z rolą `admin` odczytaną
+z bazy. Bez JWT: `401`; zwykły użytkownik: `403`. Administrator widzi zadania
+wszystkich kont. Endpoint służy wyłącznie do odczytu.
+
+Domyślnie lista obejmuje `queued`, `running`, `failed`, `needs_review`.
+Opcjonalne filtry: `status` (również `succeeded`), `kind` (np. `story`, `render`),
+`video_id`. Paginacja `limit=20` (1–100), `offset=0` (>=0), sortowanie od
+najnowszych po czasie i ID. Odpowiedź:
+
+- `items`, `total`, `limit`, `offset` — strona wyników;
+- `counts` — liczby dla wszystkich statusów, respektujące `kind` i `video_id`,
+  ale niezależne od wybranego filtra statusu.
+
+Element zawiera ID zadania/właściciela/kanału/filmu/sceny, kolejkę, rodzaj,
+status, próby i ich limit, znaczniki czasu, `request_id`, bezpieczny kod błędu
+oraz kategorię. Nie zawiera `parameters`, `checkpoint`, `result`, promptów,
+kluczy idempotency ani danych dostępowych.
+
+```sh
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  'http://localhost:8000/api/v1/admin/jobs?status=failed&limit=20'
+```
+
+Aktualizacja: `docker compose up -d --build` wykona migrację `0017`.
+Nie dodano zewnętrznego monitoringu ani zależności telemetrycznych. Punkty
+rozszerzeń to middleware HTTP, kontekst logów, opakowanie providera i zdarzenia
+workera. Etap 20 zamyka numerowaną listę etapów; pozostałe prace produktowe
+(np. automatyczne połączenie całego pipeline i seed/demo) są wymienione w TODO.

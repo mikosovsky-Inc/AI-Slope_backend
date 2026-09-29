@@ -17,3 +17,5 @@ class TaskRead(BaseModel):
     result: dict | None
     created_at: datetime
     completed_at: datetime | None
+    request_id: str | None = None
+    error_category: str | None = None

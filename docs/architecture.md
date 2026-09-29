@@ -837,3 +837,42 @@ migracji 0016 z SQLModel oraz downgrade. Ruff check i format przeszły (240 plik
 Compose po korekcie walidacji opcjonalnego null uruchomił API, worker, dispatcher
 i scheduler. Test HTTP wykonał workflow mock, audio, replay i odczyt budżetu.
 Nie używano płatnych API; ścieżki wyceny live sprawdzono z atrapami providerów.
+
+## Etap 20 — obserwowalność
+
+ContextVar przechowuje korelację request/task/video w kontekście wykonania.
+Middleware ASGI waliduje lub generuje X-Request-ID, mierzy żądanie i zapisuje
+szablon trasy. Uvicorn access log jest wyciszony, żeby nie dublować zdarzeń ani
+zapisywać raw query string. Handler nieobsłużonego 500 zachowuje ID także wtedy,
+gdy odpowiedź tworzy zewnętrzny ServerErrorMiddleware.
+
+Migracja 0017 dodaje Task.request_id i Task.error_category. Outbox przejmuje
+ID z kontekstu; runner odtwarza go w swoim procesie, a kolejne enqueue dziedziczą
+korelację. Brak ID w zadaniu daje task-UUID w logach. Kontekst nie zmienia
+idempotency ani czasu życia providera w app.state. Pomiar adapterów odbywa się
+przy wstrzyknięciu zależności API i tworzeniu providerów przez worker.
+
+Formatter serializuje wyłącznie dozwolone metadane. Provider wrapper loguje
+czas i typ błędu, bez argumentów, wyników i treści wyjątków. Błędy są
+klasyfikowane centralnie; kategoria jest zapisywana obok istniejącego kodu
+błędu Task. Retry nadal kontroluje dotychczasowy runner — telemetria nie zmienia
+limitu prób, budżetu ani polityki niepewnych wywołań.
+
+Moduł observability dostarcza odczyt zbiorczych statusów i stronicowanych zadań.
+Router /admin/jobs wymaga roli admin w bieżącym rekordzie użytkownika.
+Metadane obejmują wszystkie konta, ale pomijają parametry, checkpointy i wyniki.
+Podstawowe logi i punkty rozszerzeń nie wymagają wdrażania zewnętrznego monitoringu.
+
+Test końcowego Compose przez HTTP potwierdził X-Request-ID w odpowiedziach,
+propagację korelacji do kolejnych zadań, zakończenie pięciu kroków workflow,
+odmowę dostępu zwykłemu użytkownikowi i zbiorczy odczyt zadań przez administratora.
+Odczyt JSON logów API/workera potwierdził eventy http_request, provider_call,
+worker_execution i task_completed z identyfikatorami, kolejką i czasami.
+Providery AI działały w mock; procesy, PostgreSQL, Redis i SeaweedFS były rzeczywiste.
+
+Końcowa regresja etapu 20: 359 passed, 44 ostrzeżenia zależności
+(Starlette/AnyIO i konfiguracja Alembic). Ruff check oraz format --check
+przeszły dla 248 plików; git diff --check nie wykazał błędów. Testy obejmują
+równoległe requesty, nagłówek korelacji również przy 500, lifecycle providerów,
+bezpieczny formatter, kategorie błędów, propagację do child tasks, uprawnienia
+admina, paginację oraz migrację PostgreSQL zgodną z SQLModel i downgrade.
