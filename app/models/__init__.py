@@ -7,10 +7,12 @@ from app.modules.director.models import DirectorPlan
 from app.modules.ideas.models import ContentIdea
 from app.modules.quality.models import QualityCheck
 from app.modules.research.models import ResearchDocument, ResearchFact, SceneResearchFact
+from app.modules.scheduler.models import DailyPlan
 from app.modules.tasks.models import Task
 from app.modules.videos.models import Scene, Video, VideoScript, VideoStatusEvent
 
 __all__ = [
+    "DailyPlan",
     "QualityCheck",
     "Task",
     "CostEvent",

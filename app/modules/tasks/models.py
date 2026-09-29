@@ -53,6 +53,7 @@ class Task(Base, table=True):
     __tablename__ = "tasks"
     __table_args__ = (
         UniqueConstraint("owner_id", "idempotency_key", name="uq_task_owner_key"),
+        Index("ix_tasks_channel_kind_status", "channel_id", "kind", "status"),
         Index("ix_task_delivery", "status", "available_at"),
         CheckConstraint("attempts >= 0 AND max_attempts BETWEEN 1 AND 10", name="ck_task_attempts"),
     )

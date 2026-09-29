@@ -41,6 +41,12 @@ def execute_operation(db: Session, task: Task, settings: Settings) -> dict:
         stack.callback(provider.close)
         return provider
 
+    if task.parameters.get("scheduler_plan_id"):
+        from app.modules.scheduler.service import scheduled_task_skip_reason
+
+        reason = scheduled_task_skip_reason(db, task, settings)
+        if reason:
+            return {"skipped": True, "reason": reason}
     if task.parameters.get("quality_check_id"):
         from app.modules.quality.models import QualityCheck, QualityStatus
         from app.modules.videos.models import VideoStatus

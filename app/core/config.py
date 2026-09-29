@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     quality_max_scene_retries: int = Field(default=2, ge=0, le=5)
     quality_timeout_seconds: int = Field(default=180, ge=10, le=1800)
     quality_repair_timeout_seconds: int = Field(default=3600, ge=30, le=86400)
+    scheduler_enabled: bool = True
+    scheduler_interval_seconds: float = Field(default=60, ge=1, le=3600)
+    scheduler_timezone: str = Field(default="UTC", max_length=100)
+    scheduler_batch_size: int = Field(default=100, ge=1, le=1000)
+    scheduler_max_idea_batches_per_day: int = Field(default=2, ge=1, le=10)
     tasks_eager: bool = False  # Test harness only: retain direct service assertions.
     task_dispatch_interval_seconds: float = Field(default=2, ge=0.1, le=60)
     task_lease_seconds: int = Field(default=300, ge=30, le=3600)
@@ -81,6 +86,17 @@ class Settings(BaseSettings):
     s3_region: str = "us-east-1"
     s3_access_key_id: SecretStr | None = None
     s3_secret_access_key: SecretStr | None = None
+
+    @field_validator("scheduler_timezone")
+    @classmethod
+    def valid_scheduler_timezone(cls, value: str) -> str:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError):
+            raise ValueError("Use an installed IANA timezone, e.g. Europe/Warsaw") from None
+        return value
 
     @field_validator("tts_usd_per_1000_characters", mode="before")
     @classmethod

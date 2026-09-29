@@ -711,3 +711,56 @@ workera i SeaweedFS: STORY → Director → 5 scen z assetami → render → QC 
 → READY potwierdzone odczytem PostgreSQL. Pobranie finalnego MP4 przez JWT API
 zwróciło 309105 bajtów. Zewnętrzne generatory działały jako mocki; media, FFmpeg,
 PostgreSQL, broker i storage były rzeczywiste. Nie wykonywano płatnych calli.
+
+## Etap 17 — Scheduler
+
+`app.workers.scheduler` jest osobnym procesem w Compose. Korzysta z prostego
+przebiegu po kanałach i istniejącego outboxa, bez dodatkowego frameworka cron.
+`plan_once` stronicuje kanały po ID; `plan_channel` wykonuje jedną krótką transakcję
+User → Channel. W niej odczytuje zagregowane liczby filmów w oknie dnia, rezerwuje
+pomysły, tworzy brakujące Video i zadania workflow. Providerów uruchamiają workery.
+
+`create_video` zachowuje domyślny commit dla API; planner korzysta z wariantu
+`commit=False`, dzięki czemu błąd outboxa wycofuje cały plan wraz z filmami.
+Zachowujemy wspólną blokadę Channel także z ręcznym create-video. Dwa schedulery
+nie mogą równocześnie obliczyć i utworzyć tego samego deficytu.
+
+SQLModel DailyPlan (migracja 0015) ma unikalność kanał/dzień, jawne okno UTC,
+strefę IANA, cel, stan oraz ID partii pomysłów. Limit zleconych partii jest trwały
+po restarcie. Niepewny/nieudany generator nie dostaje nowego zadania przy każdym
+ticku. Indeks tasks(channel_id, kind, status) wspiera sprawdzanie trwających prac
+kanału. Liczniki Video obejmują wszystkie stany i ręcznie utworzone filmy;
+FAILED nie powoduje nieograniczonego automatycznego zastępowania filmów.
+
+Tryb manual czeka na akceptację tematów; semi_auto może wybierać kandydatów,
+preferując brakujący format według blueprintu. Pula pomysłów ogranicza kolejne
+partie. Wybór uwzględnia język, włączone formaty i priorytet akceptacji człowieka.
+Aktywny kanał bez gotowego blueprintu jest blokowany, nie analizowany automatycznie.
+
+Zadania automatycznych pomysłów mają scheduler_plan_id i przed otwarciem providera
+sprawdzają kanał, okno, flagę włączenia i osiągnięcie limitu. Oczekujące zadania
+z poprzedniego dnia lub wstrzymanego kanału są pomijane bez płatnej generacji.
+Trwających zewnętrznych calli i już utworzonych workflow nie anulujemy przy pauzie.
+
+Strefa kalendarza pochodzi z pydantic-settings; okno powstaje przez ZoneInfo,
+a nie przez dodanie stałych 24 godzin do UTC. Bieżąca konfiguracja videos_per_day
+może zwiększyć lub zmniejszyć deficyt. Planner nie usuwa filmów, nie nadrabia
+historycznych dni i nie publikuje. Po utworzeniu Video istniejący workflow
+prowadzi do scenariusza i Directora. Automatyczne zlecenie assetów i pierwszego
+renderu pozostaje TODO; nie zostało ukryte w schedulerze.
+
+Etap 18 (API panelu) nie został rozpoczęty. Uruchomienie, tryby, granice
+planowania i konfiguracja zostały opisane w README.
+
+Test działającego Compose (2026-09-28) potwierdził: aktywny semi_auto utworzył
+2 filmy STORY do SCRIPT_READY, kolejne przebiegi nie dublowały pracy; pauza
+wstrzymała uzupełnienie podwyższonego limitu, a wznowienie utworzyło tylko trzeci
+film. Manual wygenerował kandydatów i utworzył 1 film dopiero po approve.
+Plany miały odpowiednio complete/3 i waiting_approval/2. Polecenie --once
+przeskanowało oba kanały, tworząc 0 dodatkowych filmów i 0 zadań, bez błędów.
+Zewnętrzne AI działało w mock; procesy, kolejki i PostgreSQL były rzeczywiste.
+
+Końcowa walidacja etapu 17: pełny zestaw testów zakończył się wynikiem
+327 passed (38 ostrzeżeń). Testy PostgreSQL potwierdziły brak duplikatów przy
+równoległym planowaniu oraz rollback planu, filmów i zmian pomysłów przy błędzie
+zapisu zadania. Ruff check i kontrola formatowania (227 plików) przeszły poprawnie.

@@ -67,8 +67,15 @@ def transition_video(
 
 
 def create_video(
-    db: Session, owner_id: UUID, idea_id: UUID, *, enqueue_workflow: bool = False
+    db: Session,
+    owner_id: UUID,
+    idea_id: UUID,
+    *,
+    enqueue_workflow: bool = False,
+    commit: bool = True,
+    now: datetime | None = None,
 ) -> tuple[VideoRead, bool]:
+    now = now or datetime.now(UTC)
     if enqueue_workflow:
         from app.models.user import User
 
@@ -87,7 +94,8 @@ def create_video(
         existing = db.exec(select(Video).where(Video.idea_id == idea_id)).one_or_none()
         if existing is not None:
             result = VideoRead.model_validate(existing)
-            db.commit()
+            if commit:
+                db.commit()
             return result, False
         if idea.status != IdeaStatus.APPROVED:
             raise VideoRequiresApprovedIdea
@@ -101,6 +109,8 @@ def create_video(
         )
         video = Video(
             idea_id=idea_id,
+            created_at=now,
+            updated_at=now,
             title=idea.title,
             language=idea.language,
             format=idea.format,
@@ -126,7 +136,7 @@ def create_video(
             reason="Idea attached; awaiting the next workflow stage",
         )
         idea.status = IdeaStatus.USED
-        idea.updated_at = datetime.now(UTC)
+        idea.updated_at = now
         channel.updated_at = idea.updated_at
         db.add(idea)
         db.add(channel)
@@ -147,7 +157,8 @@ def create_video(
                 key=f"workflow:{video.id}",
                 commit=False,
             )
-        db.commit()
+        if commit:
+            db.commit()
         return result, True
     except Exception:
         db.rollback()

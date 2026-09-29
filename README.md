@@ -4,12 +4,13 @@ FastAPI + PostgreSQL, schematy API Pydantic, konfiguracja `pydantic-settings`,
 hasła Argon2id i tokeny dostępu JWT (HS256). Modele bazy i sesje korzystają z SQLModel (opartego na SQLAlchemy i Pydantic),
 a migracje z Alembic. E-maile są zapisywane małymi literami i unikalne.
 
-## Stan projektu — etapy 1–16
+## Stan projektu — etapy 1–17
 
 Modularny monolit FastAPI z JWT, PostgreSQL/SQLModel, Redis i SeaweedFS.
 Działa analiza kanału, pomysły, scenariusze STORY/TOP5, Director, adaptery
 Runpod/TTS, asynchroniczne zadania Dramatiq, renderer FFmpeg i techniczna kontrola
-jakości z naprawą pojedynczych scen. Po pozytywnym QC film otrzymuje stan `READY`.
+jakości z naprawą pojedynczych scen oraz osobny scheduler dziennego planu kanałów.
+Po pozytywnym QC film otrzymuje stan `READY`.
 Szczegóły: [docs/architecture.md](docs/architecture.md).
 
 **Od etapu 14 operacje generowania zwracają `202` i zadanie, a wynik odbiera się
@@ -33,7 +34,9 @@ lokalnej. Następnie:
 docker compose up --build
 ```
 
-Compose uruchamia `api`, `postgres`, `redis`, `seaweedfs`, `worker` i `dispatcher`.
+Compose uruchamia `api`, `postgres`, `redis`, `seaweedfs`, `worker`, `dispatcher`
+i `scheduler`. Scheduler domyślnie planuje aktywne kanały; w trybie live może zlecać
+wywołania providerów. Wyłącza go `SCHEDULER_ENABLED=false`.
 API czeka na gotowość obu zależności, wykonuje `alembic upgrade head`,
 następnie startuje Uvicorn. Błąd migracji zatrzymuje start API.
 Dane PostgreSQL, Redis i SeaweedFS są przechowywane w nazwanych wolumenach.
@@ -240,13 +243,16 @@ Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
 
 
-## TODO po etapie 16
+## TODO po etapie 17
 
-- Etapy 17–20: scheduler, panelowe API, budżety i rozszerzona obserwowalność.
+- Etap 18: API panelu, edycji i ponawiania filmów/scen.
+- Etapy 19–20: budżety i rozszerzona obserwowalność.
+- Automatyczne połączenie Directora z generowaniem assetów i pierwszym renderem; seed/demo.
 
-Worker i dispatcher są uruchamiane w Compose. Nie ma jeszcze schedulera ani polecenia seed/demo.
-Render uruchamiany ręcznie prowadzi już przez kontrolę jakości do READY. Adapter OpenAI jest używany przez jawną analizę kanału. Sam start w trybie
-`live` nie wykonuje płatnych operacji.
+Worker, dispatcher i scheduler są uruchamiane w Compose. Nie ma jeszcze polecenia seed/demo.
+Render uruchamiany ręcznie prowadzi już przez kontrolę jakości do READY.
+W trybie `live` działający scheduler może zlecać płatne generowanie dla aktywnych
+kanałów; `SCHEDULER_ENABLED=false` wyłącza tę automatyzację.
 
 
 ## Etap 2 — kanały
@@ -1446,4 +1452,103 @@ operacje FFmpeg; transfery mają timeout adaptera storage. Suma pobieranych plik
 
 Po aktualizacji uruchom `docker compose up -d --build`; API wykona migrację.
 Dla instalacji lokalnej: `uv run alembic upgrade head`, a następnie restart
-API, workera i dispatchera. Nie uruchamiamy jeszcze schedulera z etapu 17.
+API, workera i dispatchera. Scheduler jest opisany w sekcji etapu 17 poniżej.
+
+## Etap 17 — Scheduler
+
+Osobny proces `python -m app.workers.scheduler` okresowo sprawdza aktywne kanały
+aktywnych użytkowników. Dla bieżącego dnia oblicza różnicę między
+`Channel.videos_per_day` a liczbą utworzonych rekordów Video. Liczy wszystkie filmy
+z tego dnia, także utworzone ręcznie, przetwarzane i zakończone błędem. Dzięki temu
+nie zastępuje bez końca nieudanych filmów kolejnymi płatnymi próbami.
+
+### Zasady planowania
+
+- `draft`, `paused` i kanały wyłączonych użytkowników są pomijane.
+- Kanał musi mieć gotowy blueprint: odbiorców i przynajmniej jeden content pillar.
+  Scheduler nie zleca automatycznie analizy; brak konfiguracji oznacza
+  `blocked / blueprint_not_ready`.
+- `manual`: planner uzupełnia pulę pomysłów, ale tworzy filmy tylko z pomysłów
+  zatwierdzonych przez użytkownika. Aktywny kanał nie wymaga osobnego kliknięcia
+  create-video po approve. Powtórne wywołanie create-video zwróci istniejący film.
+- `semi_auto`: planner najpierw wykorzystuje pomysły zatwierdzone, potem wybiera
+  kandydatów. Preferuje format niedoreprezentowany w planie według blueprintu,
+  a w jego obrębie najstarszy temat. Jest to deterministyczna heurystyka, nie ocena
+  popularności przez AI. Pomysły w innym języku lub z wyłączonego formatu są pomijane.
+- Istniejące pomysły są używane przed generowaniem nowych. Oczekujące na akceptację
+  tematy ograniczają dalsze generowanie w manual; backlog nie rośnie przy każdym ticku.
+- Nowe pomysły powstają przez istniejący Task `ideas`, w partiach 10–20 zgodnych
+  z kontraktem Idea Engine. Domyślnie najwyżej 2 takie zadania na kanał i dzień.
+  Błąd lub niepewny wynik zaplanowanego generatora blokuje nowe automatyczne partie
+  tego dnia. Ręczne dostarczenie/zaakceptowanie dostępnych pomysłów nadal pozwala
+  wypełnić plan.
+- W trakcie oczekującej analizy lub generowania pomysłów dla kanału planner czeka,
+  aby nie zmieniać wersji kanału używanej przez trwające wywołanie AI.
+
+Nowe Video oraz pierwsze zadanie workflow powstają atomowo. STORY uruchamia
+scenariusz → Director; TOP5 uruchamia research → scenariusz → Director.
+**Obecny automatyczny łańcuch kończy się na `SCRIPT_READY`.** Generowanie assetów,
+audio i pierwszy render nadal zleca się endpointami opisanymi w etapach 15–16;
+render automatycznie prowadzi już przez QC do READY. Nie dodano publikacji.
+TOP5 nadal wymaga źródeł — pusty provider researchu zatrzyma jego przetwarzanie.
+
+### Trwałość, dzień i współbieżność
+
+Migracja `0015` dodaje SQLModel `DailyPlan` i indeks zadań kanału. Plan jest
+unikalny dla `(channel_id, day)`; zachowuje strefę, granice dnia w UTC, bieżący cel,
+stan, bezpieczny kod blokady i ID zaplanowanych zadań generowania pomysłów.
+Stany: `complete`, `waiting_approval`, `waiting_task`, `blocked`.
+`complete` oznacza osiągniętą liczbę utworzonych filmów, nie zakończenie ich renderów.
+
+Krótka transakcja z blokadami User → Channel obejmuje plan, zmiany pomysłów,
+Video i task outbox. Można uruchomić kilka schedulerów; ponowny tick i restart
+nie dublują filmów ani partii pomysłów. Scheduler nie łączy się z providerami ani
+brokerem — wysyłką zapisanych Task zajmuje się dispatcher. Kanały są skanowane
+stronami po ID, więc pierwsza partia nie blokuje obsługi kolejnych kanałów.
+
+Dzień domyślnie oznacza **UTC**, a konfiguracja IANA, np. `Europe/Warsaw`, uwzględnia
+dni 23/25-godzinne przy zmianie czasu. Okno jest domknięte z lewej i otwarte z prawej.
+Utworzony plan zachowuje swoje granice. Strefa jest wspólna dla instalacji; zmianę
+strefy najlepiej wykonać po zakończeniu bieżącego dnia. Scheduler nie nadrabia
+poprzednich dni. Zwiększenie videos_per_day uzupełnia bieżący plan; zmniejszenie
+nie usuwa już utworzonych filmów. Ręczne create-video może przekroczyć cel — jest
+to limit automatycznego planowania, nie twardy limit uprawnień użytkownika.
+
+Worker przed automatycznym generowaniem pomysłów ponownie sprawdza aktywność
+kanału, włączenie schedulera, ważność okna i dzienny limit. Nieaktualne zadanie
+kończy się `succeeded` z `{"skipped":true,"reason":"..."}`, bez calla providera.
+Wstrzymanie kanału zatrzymuje nowe planowanie i nieuruchomione automatyczne partie;
+nie cofa już utworzonych filmów ani rozpoczętych wywołań. Także pominięte zadanie
+zużywa miejsce w dziennym limicie partii.
+
+### Uruchomienie
+
+```dotenv
+SCHEDULER_ENABLED=true
+SCHEDULER_INTERVAL_SECONDS=60
+SCHEDULER_TIMEZONE=UTC
+SCHEDULER_BATCH_SIZE=100
+SCHEDULER_MAX_IDEA_BATCHES_PER_DAY=2
+```
+
+```sh
+docker compose up -d --build
+docker compose logs -f scheduler
+```
+
+Proces czeka na zdrowe API po migracjach, obsługuje SIGTERM/SIGINT i zwalnia pool
+połączeń przy wyjściu. Interwał jest przerwą między przebiegami, nie godziną publikacji.
+Obraz Docker zawiera `tzdata`. Lokalnie wymagane są dane stref czasowych systemu.
+
+Jednorazowy przebieg (wykonuje rzeczywiste planowanie, nie dry-run):
+
+```sh
+uv run --no-active python -m app.workers.scheduler --once
+# albo w działającym Compose:
+docker compose exec scheduler python -m app.workers.scheduler --once
+```
+
+`--once` wypisuje JSON z liczbą przeskanowanych kanałów, utworzonych filmów,
+zleconych partii i błędów. Błąd jednego kanału nie blokuje pozostałych; proces
+jednorazowy zwraca kod 1, jeżeli wystąpiły błędy techniczne. Wyłączony scheduler
+zwraca zera. Nie dodano endpointów panelu ani schedulera publikacji.

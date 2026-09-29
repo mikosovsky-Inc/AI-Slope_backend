@@ -2,6 +2,11 @@ services:
   api:
     build: .
     environment: &backend_environment
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
+      SCHEDULER_INTERVAL_SECONDS: ${SCHEDULER_INTERVAL_SECONDS:-60}
+      SCHEDULER_TIMEZONE: ${SCHEDULER_TIMEZONE:-UTC}
+      SCHEDULER_BATCH_SIZE: ${SCHEDULER_BATCH_SIZE:-100}
+      SCHEDULER_MAX_IDEA_BATCHES_PER_DAY: ${SCHEDULER_MAX_IDEA_BATCHES_PER_DAY:-2}
       TASKS_EAGER: "false"
       TASK_DISPATCH_INTERVAL_SECONDS: ${TASK_DISPATCH_INTERVAL_SECONDS:-2}
       TASK_LEASE_SECONDS: ${TASK_LEASE_SECONDS:-300}
@@ -93,6 +98,18 @@ services:
     build: .
     entrypoint: []
     command: ["python", "-m", "app.workers.dispatcher"]
+    environment: *backend_environment
+    depends_on:
+      api:
+        condition: service_healthy
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 20s
+
+  scheduler:
+    build: .
+    entrypoint: []
+    command: ["python", "-m", "app.workers.scheduler"]
     environment: *backend_environment
     depends_on:
       api:
