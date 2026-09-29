@@ -764,3 +764,37 @@ Końcowa walidacja etapu 17: pełny zestaw testów zakończył się wynikiem
 327 passed (38 ostrzeżeń). Testy PostgreSQL potwierdziły brak duplikatów przy
 równoległym planowaniu oraz rollback planu, filmów i zmian pomysłów przy błędzie
 zapisu zadania. Ruff check i kontrola formatowania (227 plików) przeszły poprawnie.
+
+## Etap 18 — API panelu
+
+Router panelu deleguje odczyty i mutacje do modules/panel. Kontrakty Pydantic
+ograniczają pola i rozmiary odpowiedzi. Agregacje wykonywane w SQL filtrują po
+właścicielu kanału; autoryzacja poprzedza odczyt szczegółów i każdą mutację.
+Koszty raportują wyłącznie istniejące CostEvent, rozróżniając estimates i actuals.
+
+Mutacje blokują User → Video, a retry dodatkowo Task. Dzięki temu współbieżne
+żądania nie tworzą dwóch zadań regeneracji pod tym samym kluczem ani dwóch
+wpisów recovery. Zapis historii wznowienia FAILED i ponowne ustawienie zadania
+na queued należą do jednej transakcji. Zwykła maszyna stanów nie otrzymała
+ogólnego przejścia z FAILED; wyjątek dotyczy wyłącznie jawnego retry zgodnego
+z ostatnim błędem scenariusza/researchu, bez istniejącego VideoScript.
+
+Regeneracja używa trwałego task outbox. ID zadania w fingerprint TTS odróżnia
+świadome nowe zlecenie od redelivery. Stare assety nie są kasowane. Edycja
+scen przed generacją blokuje niejawne unieważnienie wcześniej wygenerowanych
+plików. Gotowe filmy i niepewne wyniki providerów wymagają późniejszego,
+osobnego przepływu odzyskiwania/wersjonowania. Limity napraw QC pozostają trwałe.
+
+Testy panelu obejmują JWT i izolację właścicieli dla wszystkich ścieżek,
+paginację i sumowanie kosztów (w tym actual=0), edycję i konflikty stanu,
+regenerację audio z wykonaniem workera, idempotency oraz retry scenariusza
+z kontynuacją workflow. Testy PostgreSQL sprawdzają współbieżne regeneracje
+oraz retry. Etap 17 ponownie sprawdzono jego testami jednostkowymi i PostgreSQL.
+
+Walidacja końcowa (2026-09-29): pełny zestaw 338 passed, 40 ostrzeżeń
+zależności; dodatkowy test rollbacku retry w PostgreSQL: 1 passed.
+Ruff check i format --check przeszły (233 pliki). Test końcowego obrazu Compose
+przez HTTP potwierdził odczyty panelu, PATCH sceny, asynchroniczną regenerację
+audio przez dispatcher/worker, odtworzenie tego samego zadania dla Idempotency-Key
+oraz zdarzenie kosztowe. AI/TTS działały w mock, PostgreSQL/Redis/SeaweedFS i
+procesy były rzeczywiste. Nie wykonywano płatnych wywołań live.

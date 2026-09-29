@@ -4,7 +4,7 @@ FastAPI + PostgreSQL, schematy API Pydantic, konfiguracja `pydantic-settings`,
 hasła Argon2id i tokeny dostępu JWT (HS256). Modele bazy i sesje korzystają z SQLModel (opartego na SQLAlchemy i Pydantic),
 a migracje z Alembic. E-maile są zapisywane małymi literami i unikalne.
 
-## Stan projektu — etapy 1–17
+## Stan projektu — etapy 1–18
 
 Modularny monolit FastAPI z JWT, PostgreSQL/SQLModel, Redis i SeaweedFS.
 Działa analiza kanału, pomysły, scenariusze STORY/TOP5, Director, adaptery
@@ -243,9 +243,9 @@ Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
 
 
-## TODO po etapie 17
+## TODO po etapie 18
 
-- Etap 18: API panelu, edycji i ponawiania filmów/scen.
+- Rozszerzona edycja gotowych filmów z wersjonowaniem assetów i ręczne odzyskiwanie niepewnych zadań.
 - Etapy 19–20: budżety i rozszerzona obserwowalność.
 - Automatyczne połączenie Directora z generowaniem assetów i pierwszym renderem; seed/demo.
 
@@ -1395,8 +1395,8 @@ automatycznie scenariusza ani nie skracamy zbyt długiej narracji.
 Błąd całego filmu (np. brak finalnego MP4, zły czas lub rozdzielczość), brak
 poprawnego manifestu, błąd zadania naprawczego, timeout oczekiwania albo
 wyczerpanie limitu kończą kontrolę jako `failed` i film jako `FAILED`.
-Nie ma jeszcze publicznego endpointu ręcznego wznowienia filmu — należy do
-etapu 18. Przejście `QUALITY_CHECK → GENERATING_ASSETS` wykonuje wyłącznie
+Endpoint retry z etapu 18 obsługuje bezpieczne ponowienia wybranych zadań;
+nie resetuje nieudanego QC ani limitów jego napraw. Przejście `QUALITY_CHECK → GENERATING_ASSETS` wykonuje wyłącznie
 wewnętrzna ścieżka napraw; nie ma endpointu do dowolnej zmiany stanu filmu.
 
 Awaria storage/narzędzia lub niedostępność providera vision nie jest oceną
@@ -1552,3 +1552,95 @@ docker compose exec scheduler python -m app.workers.scheduler --once
 zleconych partii i błędów. Błąd jednego kanału nie blokuje pozostałych; proces
 jednorazowy zwraca kod 1, jeżeli wystąpiły błędy techniczne. Wyłączony scheduler
 zwraca zera. Nie dodano endpointów panelu ani schedulera publikacji.
+
+## Etap 18 — API panelu
+
+Wszystkie poniższe ścieżki mają prefix `/api/v1` i wymagają JWT
+(`Authorization: Bearer ...`). Dane są ograniczone do właściciela; cudze
+identyfikatory zwracają `404`, również dla administratora. JSON zawiera UUID
+jako stringi, daty ISO i kwoty Decimal jako stringi, bez utraty precyzji.
+Backend nie wymaga konkretnego frameworka frontendu.
+
+| Metoda | Ścieżka | Wynik |
+| --- | --- | --- |
+| GET | `/dashboard` | Liczby kanałów, aktywnych kanałów, filmów według statusu, koszty i 10 ostatnich filmów |
+| GET | `/channels/{id}/overview` | Kanał z blueprintem, liczniki pomysłów/filmów, koszty i ostatni dzienny plan schedulera |
+| GET | `/channels/{id}/ideas` | Istniejąca stronicowana lista pomysłów |
+| GET | `/channels/{id}/videos` | Stronicowana lista filmów; opcjonalny filtr `status`, np. `READY` |
+| GET | `/channels/{id}/costs` | Stronicowane zdarzenia kosztowe i podsumowanie całego kanału |
+| GET | `/videos/{id}` | Szczegóły filmu, status i snapshot blueprintu |
+| GET | `/videos/{id}/scenes` | Sceny w kolejności, z trwałymi ID do edycji/regeneracji; pusta lista przed scenariuszem |
+| GET | `/videos/{id}/status` | Stan filmu, `updated_at`, 100 ostatnich zadań oraz flaga aktywnych zadań |
+| POST | `/videos/{id}/retry` | `202 TaskRead`; body `{"task_id":"UUID"}` |
+| PATCH | `/scenes/{id}` | Zmieniona scena |
+| POST | `/scenes/{id}/regenerate` | `202 TaskRead`; body `{"kind":"image"}`, `video` lub `audio` |
+
+Listy filmów i kosztów: `limit=20` (1–100), `offset=0` (>=0), odpowiedź
+`items/total/limit/offset`. Sortowanie po czasie i ID jest stabilne.
+`status` zwraca zadania od najnowszych; `has_active_tasks` uwzględnia także
+starsze zadania spoza limitu 100. Dashboard i koszty obejmują całą historię.
+`latest_plan` może być z poprzedniego dnia — zawsze sprawdzaj jego `day`.
+
+### Koszty
+
+`estimated_usd` to suma oszacowań, `actual_usd` to suma znanych kosztów
+rzeczywistych, a `effective_usd` używa dla każdego zdarzenia kosztu rzeczywistego
+lub oszacowania, jeśli brak rozliczenia. `pending_actual_events` pokazuje liczbę
+nierozliczonych zdarzeń. Rzeczywisty koszt równy zero jest poprawnym rozliczeniem.
+Nie dodawaj sum estimated i actual do siebie. Endpoint pokazuje zapisane
+CostEvent (obecnie przede wszystkim TTS); brak zdarzenia nie oznacza, że zewnętrzne
+wywołanie było bezpłatne. Pełne egzekwowanie budżetu należy do etapu 19.
+
+### Edycja i regeneracja
+
+PATCH przyjmuje dowolny niepusty podzbiór: `narration`, `visual_prompt`, `mood`,
+`caption_emphasis`. Jawne `null`, nieznane pola i puste body zwracają `422`.
+Edycja jest możliwa w `SCRIPT_READY`, bez aktywnych zadań filmu i zanim dana scena
+ma historię generacji lub assety. Zmiana narracji TOP5 jest blokowana, żeby
+zachować powiązanie ze zweryfikowanymi faktami. Czas, typ wizualny i kolejność
+scen nie są edytowalne w tym kontrakcie — wpływają na walidację scenariusza
+oraz plan i wycenę Directora. Konflikty stanu zwracają `409`.
+
+Regeneracja działa w `SCRIPT_READY`, bez aktywnych zadań filmu. Dla wizualiów
+`kind` musi odpowiadać `visual_type` sceny. `audio` tworzy nową wersję TTS;
+pozostałe sceny i stare assety pozostają dostępne. Zadanie `needs_review` tego
+samego rodzaju dla sceny blokuje nową generację do wyjaśnienia wyniku.
+Po zmianie assetów wybierz ich nowe ID w żądaniu renderowania.
+
+Wysyłaj `Idempotency-Key` przy regeneracji: ten sam klucz i payload zwracają
+to samo zadanie (również po zakończeniu); inny payload z tym kluczem daje `409`.
+Nowy klucz oznacza świadome zlecenie nowej generacji i potencjalny koszt.
+Operacje generacji nie są wykonywane w HTTP, nawet przy `TASKS_EAGER=true`.
+Odpowiedzi `202` mają `Location: /api/v1/tasks/{id}`.
+
+### Retry
+
+Retry wznawia wskazane zadanie `failed`, zachowując ID, checkpoint i historię
+prób. Równoległe wywołania podczas oczekiwania/pracy zwracają to samo zadanie.
+Limit to 3 ręczne wznowienia na zadanie i maksymalnie 10 wykonanych prób;
+liczniki nie są resetowane. Wznowienie błędu STORY/research/TOP5 może przywrócić
+odpowiedni poprzedni etap filmu, zapisując jawny wpis historii w tej samej
+transakcji co zadanie. Typ i aktualny etap muszą do siebie pasować.
+
+`needs_review`, zakończone zadania, wyczerpany limit, naprawy QC, audio oraz
+wysłana już generacja wizualna zwracają `409`. Audio ponawiaj przez regenerację
+sceny po wyjaśnieniu ewentualnej niepewności. Retry nie odblokowuje dowolnie
+filmu READY/PUBLISHED, nie kasuje checkpointów providerów i nie resetuje QC.
+
+Przykłady (zmienne ID i TOKEN ustaw lokalnie):
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/v1/dashboard
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/v1/channels/$CHANNEL_ID/videos?limit=20&status=SCRIPT_READY"
+curl -X PATCH -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"mood":"quiet suspense"}' "http://localhost:8000/api/v1/scenes/$SCENE_ID"
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: panel-audio-1' -d '{"kind":"audio"}' \
+  "http://localhost:8000/api/v1/scenes/$SCENE_ID/regenerate"
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"task_id\":\"$TASK_ID\"}" "http://localhost:8000/api/v1/videos/$VIDEO_ID/retry"
+```
+
+Etap nie zmienia schematu bazy. Zaktualizuj procesy przez
+`docker compose up -d --build`. Etap 19 nie został rozpoczęty.

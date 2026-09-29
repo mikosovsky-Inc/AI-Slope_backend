@@ -100,7 +100,7 @@ def execute_operation(db: Session, task: Task, settings: Settings) -> dict:
                 settings,
                 regeneration_id=UUID(task.parameters["quality_check_id"])
                 if task.parameters.get("quality_check_id")
-                else None,
+                else (task.id if task.parameters.get("panel_regeneration") else None),
             )
         elif kind == TaskKind.QUALITY:
             from app.modules.quality.provider import create_visual_quality_provider
