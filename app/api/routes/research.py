@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from app.api.dependencies import AppSettings, CurrentUser, DbSession
 from app.api.task_submission import TaskKey, accepted
 from app.integrations.llm.factory import CurrentLLM
+from app.modules.costs.llm import BudgetedLLM
 from app.modules.research.provider import CurrentResearch
 from app.modules.research.schemas import ResearchRead, Top5ScriptRead
 from app.modules.research.service import generate_top5, read_research, run_research
@@ -29,7 +30,7 @@ def research(
 ) -> ResearchRead:
     if not settings.tasks_eager:
         return accepted(enqueue(db, user.id, TaskKind.RESEARCH, video_id=video_id, key=task_key))
-    return run_research(db, user.id, video_id, llm, provider)
+    return run_research(db, user.id, video_id, BudgetedLLM(llm, db, video_id, settings), provider)
 
 
 @router.get("/{video_id}/research", response_model=ResearchRead)
@@ -52,4 +53,4 @@ def script(
 ) -> Top5ScriptRead:
     if not settings.tasks_eager:
         return accepted(enqueue(db, user.id, TaskKind.TOP5, video_id=video_id, key=task_key))
-    return generate_top5(db, user.id, video_id, llm)
+    return generate_top5(db, user.id, video_id, BudgetedLLM(llm, db, video_id, settings))

@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     openai_model: str = ""
     openai_timeout_seconds: float = Field(default=30, gt=0, le=120)
     openai_max_retries: int = Field(default=2, ge=0, le=3)
+    llm_request_estimate_usd: Decimal | None = Field(
+        default=None, gt=0, le=100, max_digits=12, decimal_places=6
+    )
     director_image_estimate_usd: Decimal = Field(
         default=Decimal("0.005"), gt=0, le=100, max_digits=12, decimal_places=6
     )
@@ -98,9 +101,9 @@ class Settings(BaseSettings):
             raise ValueError("Use an installed IANA timezone, e.g. Europe/Warsaw") from None
         return value
 
-    @field_validator("tts_usd_per_1000_characters", mode="before")
+    @field_validator("tts_usd_per_1000_characters", "llm_request_estimate_usd", mode="before")
     @classmethod
-    def optional_tts_rate(cls, value: Decimal | str | None) -> Decimal | str | None:
+    def optional_provider_rate(cls, value: Decimal | str | None) -> Decimal | str | None:
         return None if value in ("", "null") else value
 
     @model_validator(mode="after")

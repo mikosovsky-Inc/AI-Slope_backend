@@ -18,6 +18,7 @@ from app.modules.assets.models import (
 )
 from app.modules.audio.pricing import ConfiguredTTSPricing
 from app.modules.costs.models import CostEvent
+from app.modules.costs.service import BudgetService
 from app.modules.ideas.models import ContentIdea
 from app.modules.scripts.service import ScriptNotFound, owned_video
 from app.modules.videos.models import Scene, VideoScript
@@ -102,6 +103,7 @@ def generate_scene_audio(
         if rate is None:
             raise AudioConflict("Configure TTS estimate before live generation")
         estimate = ConfiguredTTSPricing(rate).estimate(len(request.text))
+        BudgetService.require(db, video, estimate)
         idea = db.get(ContentIdea, video.idea_id)
         job = GenerationJob(
             scene_id=scene_id,

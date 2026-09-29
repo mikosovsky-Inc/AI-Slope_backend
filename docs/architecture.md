@@ -798,3 +798,42 @@ przez HTTP potwierdził odczyty panelu, PATCH sceny, asynchroniczną regeneracj�
 audio przez dispatcher/worker, odtworzenie tego samego zadania dla Idempotency-Key
 oraz zdarzenie kosztowe. AI/TTS działały w mock, PostgreSQL/Redis/SeaweedFS i
 procesy były rzeczywiste. Nie wykonywano płatnych wywołań live.
+
+## Etap 19 — budżet przed generacją
+
+Koszty pełnią również rolę trwałych rezerwacji: aktualny wydatek jest sumą
+COALESCE(actual, estimated), bez podwójnego liczenia. Rezerwacja przed zewnętrznym
+wywołaniem blokuje Video, sprawdza pozostały limit i zapisuje CostEvent; operacja
+nie trzyma transakcji podczas kontaktu z providerem. `can_spend` jest odczytem
+pomocniczym, za atomowość odpowiada blokada podczas zapisu rezerwacji.
+
+Migracja 0016 dodaje nullable operation_key z unikalnością per film. Historyczne
+TTS zachowuje generational idempotency, a wizualia klucz visual:task_id.
+Każde nowe wywołanie LLM filmu ma osobną rezerwację, także po wcześniejszym
+niepowodzeniu. Używana jest konfigurowana wycena requestu z uwzględnieniem liczby
+retry SDK. Cena nie jest pobierana z internetu ani hardcodowana jako taryfa.
+
+Kontrola jest wpięta w worker oraz ścieżki eager dla scenariusza/researchu.
+TTS sprawdza budżet wewnątrz istniejącej transakcji roszczenia GenerationJob.
+Mock pozostaje bezpłatny. Brak środków oznacza terminalne budget_exceeded,
+nie automatyczne ponawianie. Rezerwacje nie znikają po niepewnych błędach.
+
+Director bierze pod uwagę dotychczasowe wydatki; wykonawca wizualiów może
+zamienić jeszcze niewysłane video na image + zoom_in w SCRIPT_READY. Wybrany
+rodzaj znajduje się w checkpoint i steruje providerem, rozszerzeniem pliku
+oraz typem Asset. Nie zmieniamy oryginalnego Task.kind ani payloadu HTTP.
+Nie dotyczy to utrwalonych napraw QC, których manifest wymaga konkretnego typu.
+
+GET /videos/{id}/budget zwraca limit, uwzględnione wydatki i pozostałą kwotę,
+po sprawdzeniu JWT i właściciela. Koszty etapów kanału przed utworzeniem Video
+nie podlegają limitowi pojedynczego filmu; budżety konta i automatyczne
+uzgadnianie rachunków dostawców są poza zakresem tego etapu.
+
+Walidacja etapu 19: pełny zestaw 350 passed (43 ostrzeżenia zależności),
+a końcowy zestaw budżetu i Directora 17 passed, obejmujący również dodatkowy
+test faktycznego submit image zamiast video i polling bez ponownej rezerwacji.
+PostgreSQL potwierdził serializację wydatków, idempotentny replay i zgodność
+migracji 0016 z SQLModel oraz downgrade. Ruff check i format przeszły (240 plików).
+Compose po korekcie walidacji opcjonalnego null uruchomił API, worker, dispatcher
+i scheduler. Test HTTP wykonał workflow mock, audio, replay i odczyt budżetu.
+Nie używano płatnych API; ścieżki wyceny live sprawdzono z atrapami providerów.

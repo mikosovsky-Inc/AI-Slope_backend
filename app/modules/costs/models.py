@@ -12,6 +12,7 @@ class CostEvent(Base, table=True):
     __tablename__ = "cost_events"
     __table_args__ = (
         UniqueConstraint("generation_job_id", name="uq_cost_generation_job"),
+        UniqueConstraint("video_id", "operation_key", name="uq_cost_video_operation"),
         CheckConstraint("estimated_cost_usd >= 0", name="ck_cost_estimate"),
         CheckConstraint("actual_cost_usd >= 0", name="ck_cost_actual"),
     )
@@ -22,6 +23,7 @@ class CostEvent(Base, table=True):
         default=None, foreign_key="generation_jobs.id", ondelete="SET NULL"
     )
     provider: str = Field(max_length=100)
+    operation_key: str | None = Field(default=None, max_length=200)
     operation: str = Field(max_length=100)
     model: str = Field(max_length=200)
     estimated_cost_usd: Decimal = Field(sa_type=Numeric(12, 6))

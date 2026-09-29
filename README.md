@@ -4,7 +4,7 @@ FastAPI + PostgreSQL, schematy API Pydantic, konfiguracja `pydantic-settings`,
 hasła Argon2id i tokeny dostępu JWT (HS256). Modele bazy i sesje korzystają z SQLModel (opartego na SQLAlchemy i Pydantic),
 a migracje z Alembic. E-maile są zapisywane małymi literami i unikalne.
 
-## Stan projektu — etapy 1–18
+## Stan projektu — etapy 1–19
 
 Modularny monolit FastAPI z JWT, PostgreSQL/SQLModel, Redis i SeaweedFS.
 Działa analiza kanału, pomysły, scenariusze STORY/TOP5, Director, adaptery
@@ -243,10 +243,10 @@ Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
 
 
-## TODO po etapie 18
+## TODO po etapie 19
 
 - Rozszerzona edycja gotowych filmów z wersjonowaniem assetów i ręczne odzyskiwanie niepewnych zadań.
-- Etapy 19–20: budżety i rozszerzona obserwowalność.
+- Etap 20: rozszerzona obserwowalność.
 - Automatyczne połączenie Directora z generowaniem assetów i pierwszym renderem; seed/demo.
 
 Worker, dispatcher i scheduler są uruchamiane w Compose. Nie ma jeszcze polecenia seed/demo.
@@ -1588,8 +1588,8 @@ rzeczywistych, a `effective_usd` używa dla każdego zdarzenia kosztu rzeczywist
 lub oszacowania, jeśli brak rozliczenia. `pending_actual_events` pokazuje liczbę
 nierozliczonych zdarzeń. Rzeczywisty koszt równy zero jest poprawnym rozliczeniem.
 Nie dodawaj sum estimated i actual do siebie. Endpoint pokazuje zapisane
-CostEvent (obecnie przede wszystkim TTS); brak zdarzenia nie oznacza, że zewnętrzne
-wywołanie było bezpłatne. Pełne egzekwowanie budżetu należy do etapu 19.
+CostEvent; zakres rejestrowania i egzekwowania budżetu opisuje etap 19 poniżej.
+Brak zdarzenia nie oznacza, że zewnętrzne wywołanie było bezpłatne.
 
 ### Edycja i regeneracja
 
@@ -1643,4 +1643,76 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/jso
 ```
 
 Etap nie zmienia schematu bazy. Zaktualizuj procesy przez
-`docker compose up -d --build`. Etap 19 nie został rozpoczęty.
+`docker compose up -d --build`. Kontrola budżetu jest opisana w etapie 19 poniżej.
+
+## Etap 19 — kontrola budżetu filmu
+
+`BudgetService.can_spend()` porównuje planowany wydatek z pozostałą kwotą
+`Video.budget_limit_usd`. Limit filmu jest snapshotem z momentu jego utworzenia;
+późniejsza zmiana budżetu kanału nie zmienia istniejących filmów.
+
+Przed płatną generacją worker blokuje rekord Video w PostgreSQL i zapisuje
+CostEvent w tej samej transakcji co decyzję o przyznaniu środków. Commit następuje
+przed wywołaniem providera. Równoległe zadania nie mogą wydać tej samej pozostałej
+kwoty. Migracja `0016` dodaje unikalny `(video_id, operation_key)`; rezerwacja
+wizualiów jest związana z ID zadania i nie powtarza się podczas polling/replay.
+TTS zachowuje dotychczasową idempotency po GenerationJob.
+
+Uwzględniony wydatek to dla każdego CostEvent `actual_cost_usd`, jeśli znany,
+albo `estimated_cost_usd`. Niepewność, timeout, błąd storage i restart nie
+zwalniają automatycznie środków. Zapobiega to ponawianiu płatnych prób poza
+limitem. Odczyt budżetu:
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/v1/videos/$VIDEO_ID/budget"
+```
+
+Odpowiedź zawiera `video_id`, `currency`, `limit_usd`, `committed_usd` oraz
+`remaining_usd` (Decimal jako stringi). Wymaga JWT i właściciela filmu.
+Brak środków kończy zadanie jako `failed` z `error=budget_exceeded`, bez
+uruchamiania providera. Synchroniczna ścieżka developerska zwraca `409`.
+Ręczne retry i naprawy QC podlegają temu samemu budżetowi, a ich dotychczasowe
+limity prób pozostają aktywne.
+
+### Wycena i zakres
+
+- Runpod: stawki operatora `DIRECTOR_IMAGE_ESTIMATE_USD` i
+  `DIRECTOR_VIDEO_SECOND_ESTIMATE_USD`; koszt za czas zaokrąglany w górę do
+  6 miejsc. Rezerwacja przed nowym submit, bez ponownej rezerwacji przy polling.
+- TTS: `TTS_USD_PER_1000_CHARACTERS` i długość narracji; kontrola przed utworzeniem
+  GenerationJob i wywołaniem ElevenLabs.
+- LLM przypisany do Video (STORY, research, TOP5): wymagane
+  `LLM_REQUEST_ESTIMATE_USD`. Każde wywołanie rezerwuje skonfigurowaną kwotę
+  pomnożoną przez `1 + OPENAI_MAX_RETRIES`. Brak stawki w live blokuje generację.
+  To konserwatywna wycena jednego żądania; dobierz ją do modelu, maksymalnego
+  rozmiaru promptu/schematu i limitu tokenów odpowiedzi. Domyślnie `null`.
+- Mock jest bezpłatny. TTS nadal zapisuje zdarzenie z actual=0; mock LLM i
+  wizualia nie tworzą płatnych rezerwacji.
+
+Stawki są konfigurowalne i nie stanowią aktualnego cennika providerów.
+System egzekwuje limit według zapisanych kosztów i szacunków, nie gwarantuje
+maksymalnej kwoty faktury przy zaniżonych stawkach. Automatyczne rozliczanie
+faktur/actual kosztów oraz budżet całego konta pozostają rozszerzeniami.
+Analiza kanału i generowanie pomysłów nie mają jeszcze przypisanego Video;
+nie są objęte limitem pojedynczego filmu. Research provider jest obecnie lokalny.
+
+### Tańsze wizualia
+
+Director ogranicza nowy plan do minimum: dotychczasowego udziału budżetu wizualnego
+oraz pozostałych środków filmu. Już zapisany plan pozostaje historyczną wyceną;
+wykonanie zadań jest sprawdzane ponownie względem bieżącego budżetu.
+
+Jeśli nowy job video nie mieści się w budżecie, ale obraz się mieści, scena
+w `SCRIPT_READY` otrzymuje `visual_type=image` i `camera_motion=zoom_in`.
+Wybór i rezerwacja są trwałe; worker wywołuje image provider, zapisuje PNG,
+a renderer stosuje ruch. Rodzaj pierwotnego zadania pozostaje niezmieniony,
+żeby zachować zgodność z Idempotency-Key żądania; efektywny rodzaj jest zapisany
+w checkpoint i zdarzeniu kosztowym. Wynik zadania wskazuje rzeczywisty asset.
+
+Nie zmieniamy rodzaju już wysłanego joba ani naprawy QC, która musi odpowiadać
+utrwalonemu manifestowi. Jeśli również obraz przekracza dostępny budżet,
+żadne nowe wywołanie nie jest wykonywane.
+
+Aktualizacja: `docker compose up -d --build` uruchamia migrację `0016`.
+W trybie live ustaw wcześniej stawki w `.env`. Etap 20 nie został rozpoczęty.

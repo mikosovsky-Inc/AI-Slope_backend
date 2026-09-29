@@ -10,6 +10,7 @@ from sqlmodel import Session, select
 from app.core.config import get_settings
 from app.models.user import User
 from app.modules.audio.service import AudioConflict
+from app.modules.costs.service import BudgetExceeded
 from app.modules.quality.provider import VisualQualityUnavailable
 from app.modules.quality.service import QualityPending, enqueue_quality
 from app.modules.render.engine import RenderError
@@ -130,7 +131,9 @@ def run_task(engine, task_id: str, *, settings=None) -> None:
                 task = db.get(Task, identifier)
                 if task is None or task.run_token != token:
                     return
-                if isinstance(exc, QualityPending):
+                if isinstance(exc, BudgetExceeded):
+                    task.status, task.error = TaskStatus.FAILED, "budget_exceeded"
+                elif isinstance(exc, QualityPending):
                     task.attempts = max(0, task.attempts - 1)
                     task.status = TaskStatus.QUEUED
                     task.available_at = datetime.now(UTC) + timedelta(seconds=5)

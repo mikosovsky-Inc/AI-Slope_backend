@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import ROUND_UP, Decimal
 from typing import Protocol
 
 from pydantic import BaseModel, Field
@@ -25,7 +25,9 @@ class ConfiguredVisualEstimator:
         return self.estimates.image_usd
 
     def video_cost(self, duration: Decimal) -> Decimal:
-        return (duration * self.estimates.video_second_usd).quantize(Decimal("0.000001"))
+        return (duration * self.estimates.video_second_usd).quantize(
+            Decimal("0.000001"), rounding=ROUND_UP
+        )
 
     def snapshot(self) -> VisualEstimates:
         return self.estimates.model_copy()

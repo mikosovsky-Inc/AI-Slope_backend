@@ -13,6 +13,7 @@ from app.modules.competitors.service import (
     ResearchNotReady,
     ResearchUnavailable,
 )
+from app.modules.costs.service import BudgetExceeded
 from app.modules.director.service import (
     DirectorBudgetExceeded,
     DirectorNotReady,
@@ -124,6 +125,7 @@ async def director_error(request: Request, exc: Exception) -> JSONResponse:
 
 
 def register_error_handlers(app: FastAPI) -> None:
+    app.add_exception_handler(BudgetExceeded, budget_error)
     for error in (DirectorNotReady, DirectorBudgetExceeded, DirectorPlanNotFound):
         app.add_exception_handler(error, director_error)
     for error in (InsufficientResearch, ResearchStateConflict, FactResearchUnavailable):
@@ -142,3 +144,9 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(SQLAlchemyError, unavailable_error)
     app.add_exception_handler(RedisError, unavailable_error)
     app.add_exception_handler(Exception, unexpected_error)
+
+
+async def budget_error(request: Request, exc: BudgetExceeded) -> JSONResponse:
+    return JSONResponse(
+        status_code=409, content={"detail": "Video budget unavailable or exhausted"}
+    )

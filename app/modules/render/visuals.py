@@ -11,8 +11,12 @@ from app.modules.render.service import bucket
 from app.modules.tasks.models import TaskKind
 
 
+def visual_kind(task) -> TaskKind:
+    return TaskKind(task.checkpoint.get("budget_visual_kind", task.kind.value))
+
+
 def output_key(task) -> str:
-    extension = "png" if task.kind == TaskKind.IMAGE else "mp4"
+    extension = "png" if visual_kind(task) == TaskKind.IMAGE else "mp4"
     return f"generated/{task.id}/visual.{extension}"
 
 
@@ -28,7 +32,7 @@ def materialize_visual(db, task, settings, storage, output: dict, duration: floa
     ).first()
     if existing:
         return existing
-    is_image = task.kind == TaskKind.IMAGE
+    is_image = visual_kind(task) == TaskKind.IMAGE
     mime = "image/png" if is_image else "video/mp4"
     renderer = FFmpegRenderer(settings)
     with TemporaryDirectory(prefix="ai-slop-visual-") as directory:

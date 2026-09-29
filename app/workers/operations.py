@@ -73,6 +73,10 @@ def execute_operation(db: Session, task: Task, settings: Settings) -> dict:
             TaskKind.TOP5,
         ):
             llm = managed(stack, create_llm_provider)
+            if task.video_id:
+                from app.modules.costs.llm import BudgetedLLM
+
+                llm = BudgetedLLM(llm, db, task.video_id, settings)
         if kind == TaskKind.ANALYZE:
             result = analyze_channel(db, task.owner_id, task.channel_id, llm)
         elif kind == TaskKind.IDEAS:
@@ -123,6 +127,9 @@ def execute_operation(db: Session, task: Task, settings: Settings) -> dict:
 
 
 def visual(db: Session, task: Task, provider, settings: Settings) -> dict:
+    from app.modules.costs.visual import prepare_visual
+
+    prepare_visual(db, task, settings)
     owned_video(db, task.owner_id, task.video_id)
     scene = db.exec(
         select(Scene)
@@ -132,7 +139,9 @@ def visual(db: Session, task: Task, provider, settings: Settings) -> dict:
             VideoScript.video_id == task.video_id,
         )
     ).one()
-    from app.modules.render.visuals import materialize_visual, output_key
+    from app.modules.render.visuals import materialize_visual, output_key, visual_kind
+
+    kind = visual_kind(task)
 
     data = {
         "request_id": str(task.id),
@@ -154,7 +163,7 @@ def visual(db: Session, task: Task, provider, settings: Settings) -> dict:
         # Mock jobs are process-local and free; reconstruct after a worker restart.
         result = (
             provider.generate_image(ImageGenerationRequest(**data))
-            if task.kind == TaskKind.IMAGE
+            if kind == TaskKind.IMAGE
             else provider.generate_video(
                 VideoGenerationRequest(**data, duration_seconds=float(scene.duration))
             )
@@ -171,7 +180,7 @@ def visual(db: Session, task: Task, provider, settings: Settings) -> dict:
         db.commit()
         result = (
             provider.generate_image(ImageGenerationRequest(**data))
-            if task.kind == TaskKind.IMAGE
+            if kind == TaskKind.IMAGE
             else provider.generate_video(
                 VideoGenerationRequest(**data, duration_seconds=float(scene.duration))
             )

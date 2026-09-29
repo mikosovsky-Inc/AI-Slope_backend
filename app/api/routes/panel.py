@@ -6,6 +6,8 @@ from fastapi.responses import JSONResponse
 
 from app.api.dependencies import CurrentUser, DbSession
 from app.api.task_submission import TaskKey, accepted
+from app.modules.costs.schemas import VideoBudget
+from app.modules.costs.service import read_budget
 from app.modules.panel import service
 from app.modules.panel.schemas import (
     CostPage,
@@ -95,3 +97,8 @@ def regenerate(
     task_key: TaskKey = None,
 ) -> JSONResponse:
     return accepted(service.regenerate(db, user.id, scene_id, data.kind, task_key))
+
+
+@router.get("/videos/{video_id}/budget", response_model=VideoBudget)
+def budget(video_id: UUID, user: CurrentUser, db: DbSession) -> VideoBudget:
+    return read_budget(db, user.id, video_id)

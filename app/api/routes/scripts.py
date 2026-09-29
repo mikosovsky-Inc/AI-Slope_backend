@@ -5,6 +5,7 @@ from fastapi import APIRouter
 from app.api.dependencies import AppSettings, CurrentUser, DbSession
 from app.api.task_submission import TaskKey, accepted
 from app.integrations.llm.factory import CurrentLLM
+from app.modules.costs.llm import BudgetedLLM
 from app.modules.research.schemas import Top5ScriptRead
 from app.modules.scripts.schemas import ScriptRead
 from app.modules.scripts.service import generate_script, get_script
@@ -28,7 +29,7 @@ def generate(
 ) -> ScriptRead:
     if not settings.tasks_eager:
         return accepted(enqueue(db, user.id, TaskKind.STORY, video_id=video_id, key=task_key))
-    return generate_script(db, user.id, video_id, llm)
+    return generate_script(db, user.id, video_id, BudgetedLLM(llm, db, video_id, settings))
 
 
 @router.get("/{video_id}/script", response_model=ScriptRead | Top5ScriptRead)

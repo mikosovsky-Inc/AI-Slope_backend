@@ -4,6 +4,7 @@ from uuid import UUID
 from sqlmodel import Session, select
 
 from app.modules.channels.schemas import BlueprintInput
+from app.modules.costs.service import BudgetExceeded, BudgetService
 from app.modules.director.models import DirectorPlan
 from app.modules.director.pricing import VisualCostEstimator
 from app.modules.director.schemas import DirectedScene, DirectorRead
@@ -15,7 +16,7 @@ class DirectorNotReady(Exception):
     pass
 
 
-class DirectorBudgetExceeded(Exception):
+class DirectorBudgetExceeded(BudgetExceeded):
     pass
 
 
@@ -78,6 +79,7 @@ class DirectorService:
             visual_budget = (video.budget_limit_usd * self.visual_budget_fraction).quantize(
                 Decimal("0.000001"), rounding=ROUND_DOWN
             )
+            visual_budget = min(visual_budget, BudgetService.remaining(db, video))
             image_cost = self.estimator.image_cost()
             cost = image_cost * len(scenes)
             if cost > visual_budget:
