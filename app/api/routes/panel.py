@@ -20,6 +20,7 @@ from app.modules.panel.schemas import (
     StatusRead,
     VideoPage,
 )
+from app.modules.production.service import start_production
 from app.modules.scripts.service import owned_video
 from app.modules.tasks.schemas import TaskRead
 from app.modules.videos.models import VideoStatus
@@ -28,6 +29,11 @@ from app.modules.videos.schemas import VideoRead
 router = APIRouter(tags=["panel"])
 Limit = Annotated[int, Query(ge=1, le=100)]
 Offset = Annotated[int, Query(ge=0)]
+
+
+@router.post("/videos/{video_id}/produce", response_model=TaskRead, status_code=202)
+def produce(video_id: UUID, user: CurrentUser, db: DbSession) -> JSONResponse:
+    return accepted(start_production(db, user.id, video_id))
 
 
 @router.get("/dashboard", response_model=Dashboard)

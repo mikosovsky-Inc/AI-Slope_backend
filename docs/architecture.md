@@ -572,7 +572,8 @@ POST create-video zapisuje film, IDEA_GENERATED, zużycie pomysłu i pierwszy ta
 w tej samej transakcji. STORY uruchamia scenariusz i Directora; TOP5 research,
 scenariusz ze źródeł i Directora. Child task powstaje razem z commitem zakończenia
 rodzica. Pusty lokalny research nadal kończy TOP5 bez generowania fikcyjnych faktów.
-Workflow zatrzymuje się na SCRIPT_READY. Audio można zlecić dla sceny; zapisuje
+W samym etapie 14 workflow zatrzymywał się na SCRIPT_READY (rozszerzenie po etapie
+20 opisano na końcu dokumentu). Audio można zlecić dla sceny; zapisuje
 Asset i CostEvent. Zadania image/video uruchamiają i odpytują Runpod, zachowując
 referencję i wynik JSON. Nie deklarują gotowości wizualnych assetów ani nie
 materializują plików z dowolnych URL; integracja mediów pozostaje przed renderingiem.
@@ -746,8 +747,8 @@ Strefa kalendarza pochodzi z pydantic-settings; okno powstaje przez ZoneInfo,
 a nie przez dodanie stałych 24 godzin do UTC. Bieżąca konfiguracja videos_per_day
 może zwiększyć lub zmniejszyć deficyt. Planner nie usuwa filmów, nie nadrabia
 historycznych dni i nie publikuje. Po utworzeniu Video istniejący workflow
-prowadzi do scenariusza i Directora. Automatyczne zlecenie assetów i pierwszego
-renderu pozostaje TODO; nie zostało ukryte w schedulerze.
+prowadzi do scenariusza i Directora. Rozszerzenie po etapie 20 dodaje generowanie
+assetów i pierwszy render w workerze; scheduler nadal tylko rozpoczyna workflow.
 
 Etap 18 (API panelu) nie został rozpoczęty. Uruchomienie, tryby, granice
 planowania i konfiguracja zostały opisane w README.
@@ -819,7 +820,8 @@ Mock pozostaje bezpłatny. Brak środków oznacza terminalne budget_exceeded,
 nie automatyczne ponawianie. Rezerwacje nie znikają po niepewnych błędach.
 
 Director bierze pod uwagę dotychczasowe wydatki; wykonawca wizualiów może
-zamienić jeszcze niewysłane video na image + zoom_in w SCRIPT_READY. Wybrany
+zamienić jeszcze niewysłane video na image + zoom_in w SCRIPT_READY lub
+GENERATING_ASSETS. Wybrany
 rodzaj znajduje się w checkpoint i steruje providerem, rozszerzeniem pliku
 oraz typem Asset. Nie zmieniamy oryginalnego Task.kind ani payloadu HTTP.
 Nie dotyczy to utrwalonych napraw QC, których manifest wymaga konkretnego typu.
@@ -876,3 +878,47 @@ przeszły dla 248 plików; git diff --check nie wykazał błędów. Testy obejmu
 równoległe requesty, nagłówek korelacji również przy 500, lifecycle providerów,
 bezpieczny formatter, kategorie błędów, propagację do child tasks, uprawnienia
 admina, paginację oraz migrację PostgreSQL zgodną z SQLModel i downgrade.
+
+## Po etapie 20 — automatyczny pipeline i demo
+
+`app.modules.production.service.advance_production` jest wywoływane po udanej
+operacji workera, przed zatwierdzeniem jej wyniku. DIRECT z `workflow=true`
+przechodzi do GENERATING_ASSETS i tworzy zadanie dla każdej sceny. Dopiero komplet
+udanych wizualiów odblokowuje GENERATING_AUDIO, a komplet narracji — READY_TO_RENDER
+i jedno zadanie render. Istniejący render oraz QC prowadzą następnie do READY.
+Nie ma publikacji na TikToku ani YouTube.
+
+Rodzic, przejścia statusów i zadania potomne trafiają do jednej transakcji.
+Blokada użytkownika serializuje zakończenia jego zadań; stałe klucze pipeline’u
+zapewniają deduplikację. Przed przejściem dalej sprawdzane są typ assetu, film
+i scena. RenderManifest wskazuje dokładne assety zwrócone przez zadania,
+nie wybiera przypadkowego najnowszego pliku. Budżetowy fallback video→image
+działa również w GENERATING_ASSETS, przed wysłaniem żądania providera.
+
+`POST /videos/{id}/produce` wymaga JWT właściciela i SCRIPT_READY. Zwraca 202
+z zadaniem Directora, a kolejne wywołanie zwraca to samo zadanie.
+Automatycznie rozpoczynane filmy (create-video i scheduler) kontynuują bez tego
+żądania. Błąd zadania blokuje kolejne etapy; szczegóły są widoczne w statusie filmu.
+Nie dodano automatycznego odzyskiwania operacji o niepewnym wyniku.
+
+`python -m app.demo --owner-email EMAIL [--generate --wait]` tworzy dwa kanały,
+blueprinty i zatwierdzone pomysły dla istniejącego aktywnego użytkownika.
+Modele wejściowe są walidowane przez Pydantic, rekordy przez SQLModel.
+UUID5 i blokada właściciela zapewniają idempotencję również przy równoległym seedzie.
+Cały seed jest jedną transakcją; kanały DRAFT nie uruchamiają schedulera.
+Tryb live jest odrzucany. Research TOP5 dostaje jawne fikcyjne dokumenty DEMO
+z domeny .invalid; zwykły provider nadal nie wymyśla źródeł.
+
+Weryfikacja: 365 różnych testów zaliczonych łącznie w regresji i ponownych
+uruchomieniach poprawionych przypadków (304 jednostkowe, 40 integracyjnych,
+21 storage). Stary test workflow zmieniono z oczekiwania SCRIPT_READY na
+GENERATING_ASSETS i komplet zadań wizualnych. Nowe testy sprawdzają oba formaty
+do READY, JWT i izolację właścicieli, idempotencję, atomowy rollback fan-out,
+blokadę przy błędzie oraz równoległe zakończenia audio na PostgreSQL.
+Ruff check, format --check (254 pliki) i git diff --check przeszły.
+
+Osobny stos Compose potwierdził CLI oraz replay z rzeczywistymi PostgreSQL,
+Redis/Dramatiq, SeaweedFS i FFmpeg. Dwa filmy doszły do READY (STORY: 14 zadań,
+TOP5: 17), każdy z jednym renderem. Pobranie przez chroniony endpoint i ffprobe
+potwierdziły H.264/AAC, 1080×1920 oraz około 20 sekund. Mock obejmował wyłącznie
+zewnętrznych providerów AI; media były rzeczywistymi plikami.

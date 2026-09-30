@@ -146,10 +146,16 @@ def test_create_video_atomic_workflow(client, db, settings, story_factory):
     ).one()
     run_task(db.get_bind(), str(director.id), settings=settings)
     db.expire_all()
-    assert db.get(Video, video).status == VideoStatus.SCRIPT_READY
+    assert db.get(Video, video).status == VideoStatus.GENERATING_ASSETS
     assert db.get(Task, director.id).status == TaskStatus.SUCCEEDED
+    visuals = db.exec(
+        select(Task).where(Task.video_id == video, Task.kind.in_([TaskKind.IMAGE, TaskKind.VIDEO]))
+    ).all()
+    scenes = db.exec(select(Scene).join(VideoScript).where(VideoScript.video_id == video)).all()
+    assert {t.scene_id for t in visuals} == {s.id for s in scenes}
+    assert all(t.status == TaskStatus.QUEUED for t in visuals)
     assert client.post(idea_path + "/create-video", headers=headers).status_code == 200
-    assert len(db.exec(select(Task).where(Task.video_id == video)).all()) == 2
+    assert len(db.exec(select(Task).where(Task.video_id == video)).all()) == 2 + len(scenes)
 
 
 def test_queued_task_rejects_foreign_scene(client, db, story_factory):

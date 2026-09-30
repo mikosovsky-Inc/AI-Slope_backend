@@ -91,7 +91,14 @@ def execute_operation(db: Session, task: Task, settings: Settings) -> dict:
         elif kind == TaskKind.STORY:
             result = generate_script(*args, llm)
         elif kind == TaskKind.RESEARCH:
-            result = run_research(*args, llm, get_research_provider())
+            from app.modules.production.fixtures import demo_research
+
+            research = (
+                demo_research(settings)
+                if task.parameters.get("demo_research")
+                else get_research_provider()
+            )
+            result = run_research(*args, llm, research)
         elif kind == TaskKind.TOP5:
             result = generate_top5(*args, llm)
         elif kind == TaskKind.DIRECT:

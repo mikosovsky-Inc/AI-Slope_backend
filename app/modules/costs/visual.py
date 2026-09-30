@@ -38,7 +38,7 @@ def prepare_visual(db: Session, task: Task, settings: Settings) -> None:
     # Never alter an already submitted request or the repair type in a frozen QC manifest.
     if (
         kind == TaskKind.VIDEO
-        and video.status == VideoStatus.SCRIPT_READY
+        and video.status in (VideoStatus.SCRIPT_READY, VideoStatus.GENERATING_ASSETS)
         and scene.visual_type == VisualType.VIDEO
         and not task.checkpoint.get("submit_started")
         and not task.parameters.get("quality_check_id")

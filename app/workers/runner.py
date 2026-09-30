@@ -137,6 +137,11 @@ def _run_task(engine, task_id: str, *, settings=None) -> None:
                 task.result, task.status = result, TaskStatus.SUCCEEDED
                 task.completed_at, task.error = datetime.now(UTC), None
                 task.error_category = None
+                db.add(task)
+                db.flush()
+                from app.modules.production.service import advance_production
+
+                advance_production(db, task)
                 # Complete parent and enqueue child atomically; no broker send in this transaction.
                 next_kind = {
                     TaskKind.RESEARCH: TaskKind.TOP5,

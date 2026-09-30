@@ -247,10 +247,9 @@ Nie korzysta z bazy skonfigurowanej w `.env`.
 
 - Rozszerzona edycja gotowych filmów z wersjonowaniem assetów i ręczne odzyskiwanie niepewnych zadań.
 - Integracja z zewnętrznym systemem telemetrii (np. Sentry/Prometheus), jeśli będzie potrzebna.
-- Automatyczne połączenie Directora z generowaniem assetów i pierwszym renderem; seed/demo.
-
-Worker, dispatcher i scheduler są uruchamiane w Compose. Nie ma jeszcze polecenia seed/demo.
-Render uruchamiany ręcznie prowadzi już przez kontrolę jakości do READY.
+Automatyczny pipeline oraz seed/demo zostały dodane — instrukcja na końcu README.
+Worker, dispatcher i scheduler są uruchamiane w Compose. Workflow prowadzi przez
+Directora, wizualia, narrację, render i kontrolę jakości do READY.
 W trybie `live` działający scheduler może zlecać płatne generowanie dla aktywnych
 kanałów; `SCHEDULER_ENABLED=false` wyłącza tę automatyzację.
 
@@ -1232,16 +1231,16 @@ i pierwsze zadanie są atomowe w PostgreSQL. Status filmu początkowo wynosi
 IDEA_GENERATED; SCRIPTING/RESEARCHING ustawia worker po podjęciu pracy.
 Replay zwraca istniejący film (`200`) bez drugiego workflow.
 
-Automatyczny łańcuch na tym etapie:
+Automatyczny łańcuch (rozszerzony po etapie 20):
 
-- STORY: scenariusz → Director → SCRIPT_READY.
-- TOP5: research → scenariusz z faktów → Director → SCRIPT_READY.
+- STORY: scenariusz → Director → wizualia → audio → render → QC → READY.
+- TOP5: research → scenariusz z faktów → Director → wizualia → audio → render → QC → READY.
 
 TOP5 nadal wymaga prawdziwego korpusu źródeł; pusty LocalResearchProvider zatrzymuje
 przetwarzanie jako failed, zamiast wymyślać fakty. Nie dodano wyszukiwarki.
-Audio zlecane osobno zapisuje prawdziwy Asset i CostEvent. Od etapu 15 zadania
-wizualne zapisują również Asset, a mock generuje techniczne PNG/MP4. Po ukończeniu
-wszystkich scen można osobno zlecić render opisany poniżej.
+Audio zapisuje prawdziwy Asset i CostEvent. Zadania wizualne zapisują również
+Asset, a mock generuje techniczne PNG/MP4. Endpointy ręczne pozostają dostępne;
+workflow automatyczny zleca render po zakończeniu wszystkich scen.
 
 ### Dostarczanie, ponowienia i restart
 
@@ -1487,9 +1486,8 @@ nie zastępuje bez końca nieudanych filmów kolejnymi płatnymi próbami.
 
 Nowe Video oraz pierwsze zadanie workflow powstają atomowo. STORY uruchamia
 scenariusz → Director; TOP5 uruchamia research → scenariusz → Director.
-**Obecny automatyczny łańcuch kończy się na `SCRIPT_READY`.** Generowanie assetów,
-audio i pierwszy render nadal zleca się endpointami opisanymi w etapach 15–16;
-render automatycznie prowadzi już przez QC do READY. Nie dodano publikacji.
+Po etapie 20 łańcuch kontynuuje automatycznie generowanie assetów, audio i pierwszy
+render, a następnie kontrolę jakości do READY. Nie dodano publikacji.
 TOP5 nadal wymaga źródeł — pusty provider researchu zatrzyma jego przetwarzanie.
 
 ### Trwałość, dzień i współbieżność
@@ -1704,7 +1702,8 @@ oraz pozostałych środków filmu. Już zapisany plan pozostaje historyczną wyc
 wykonanie zadań jest sprawdzane ponownie względem bieżącego budżetu.
 
 Jeśli nowy job video nie mieści się w budżecie, ale obraz się mieści, scena
-w `SCRIPT_READY` otrzymuje `visual_type=image` i `camera_motion=zoom_in`.
+w `SCRIPT_READY` lub `GENERATING_ASSETS` otrzymuje `visual_type=image`
+i `camera_motion=zoom_in`.
 Wybór i rezerwacja są trwałe; worker wywołuje image provider, zapisuje PNG,
 a renderer stosuje ruch. Rodzaj pierwotnego zadania pozostaje niezmieniony,
 żeby zachować zgodność z Idempotency-Key żądania; efektywny rodzaj jest zapisany
@@ -1797,4 +1796,66 @@ Aktualizacja: `docker compose up -d --build` wykona migrację `0017`.
 Nie dodano zewnętrznego monitoringu ani zależności telemetrycznych. Punkty
 rozszerzeń to middleware HTTP, kontekst logów, opakowanie providera i zdarzenia
 workera. Etap 20 zamyka numerowaną listę etapów; pozostałe prace produktowe
-(np. automatyczne połączenie całego pipeline i seed/demo) są wymienione w TODO.
+(np. wersjonowana edycja gotowych filmów) są wymienione w TODO.
+
+## Automatyczny pipeline i seed/demo
+
+W trybie kolejkowym (`TASKS_EAGER=false`, domyślnie w Compose) utworzenie filmu
+z zatwierdzonego pomysłu uruchamia cały łańcuch. Director zleca wizualia dla każdej
+sceny; po zakończeniu wszystkich wizualiów rusza narracja, a po zakończeniu całej
+narracji — render i QC. `READY` oznacza gotowy film, bez publikacji na platformach.
+Poszczególne endpointy ręcznego generowania nadal wykonują tylko swój krok.
+
+Dla starszego filmu z gotowym scenariuszem (`SCRIPT_READY`) można wystartować
+produkcję jednym żądaniem właściciela:
+
+```sh
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/v1/videos/$VIDEO_ID/produce"
+```
+
+Odpowiedź `202` zawiera zadanie Directora i nagłówek `Location`. Powtórzenie
+żądania zwraca to samo zadanie. Postęp całego filmu odczytuj przez
+`GET /api/v1/videos/{id}/status`. Endpoint wymaga JWT i sprawdza własność filmu.
+
+Zakończenie zadania, zmiana etapu i zapis następnych zadań są atomowe.
+Stałe klucze zadań oraz blokada właściciela zapobiegają podwójnemu renderowi,
+również gdy ostatnie narracje kończą się równocześnie. Render dostaje manifest
+z konkretnymi identyfikatorami assetów z tego pipeline’u.
+Błąd lub `needs_review` zatrzymuje przejście do kolejnego etapu; pozostałe
+uruchomione sceny mogą się dokończyć. Film zachowuje ostatni etap, a szczegóły
+blokady są w zadaniach. Niepewne operacje nie są automatycznie ponawiane;
+rozszerzone ręczne odzyskiwanie pozostaje TODO. Obowiązują dotychczasowe limity budżetu.
+
+### Demo bez płatnych providerów
+
+Ustaw `EXTERNAL_PROVIDERS_MODE=mock`, uruchom Compose i zarejestruj konto.
+Następnie, w folderze backendu, podstaw jego adres e-mail:
+
+```sh
+docker compose up -d --build
+docker compose exec api python -m app.demo --owner-email twoj@email.pl
+docker compose exec api python -m app.demo --owner-email twoj@email.pl --generate --wait
+```
+
+Pierwsze polecenie demo tworzy kanały, blueprinty i zatwierdzone pomysły:
+
+- „Mroczne ciekawostki historyczne” — TOP5, język polski.
+- „Short fictional horror stories with unexpected twists” — STORY, język angielski.
+
+`--generate` tworzy po jednym filmie i zleca workflow. `--wait` czeka do `READY`
+(domyślnie 600 sekund; zmień przez `--timeout`). Worker i dispatcher muszą działać.
+Przekroczenie czasu nie usuwa zadań. Wynik wypisuje identyfikatory kanałów i filmów.
+Listę assetów odczytasz przez `GET /api/v1/videos/{id}/assets`; wybierz
+`type=final_video` i pobierz plik przez `GET /api/v1/assets/{asset_id}/download` z JWT.
+
+Demo wymaga istniejącego aktywnego konta, nie tworzy haseł ani nie zmienia ról.
+Powtórne uruchomienie nie dubluje danych ani nie nadpisuje kanałów. Kanały pozostają
+w stanie DRAFT, więc scheduler nie produkuje kolejnych filmów demo.
+Poza Compose można użyć `uv run python -m app.demo` z tymi samymi argumentami
+i konfiguracją `.env` wskazującą na działającą infrastrukturę.
+
+Mock tworzy techniczne obrazy/klipy, cichą ścieżkę WAV, napisy i prawdziwy MP4.
+TOP5 w tym demo korzysta wyłącznie z jawnych syntetycznych źródeł `demo.invalid`,
+oznaczonych jako DEMO — to nie są fakty historyczne. Zwykły research nadal wymaga
+własnego korpusu źródeł. CLI i testowy provider researchu odrzucają tryb `live`.
