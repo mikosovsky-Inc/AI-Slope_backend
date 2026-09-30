@@ -37,8 +37,10 @@ def child_key(video_id: UUID, stage: str, scene_id: UUID) -> str:
     return f"pipeline:{video_id}:{stage}:{scene_id}"
 
 
-def children(db: Session, video_id: UUID, stage: str, scenes: list[Scene]) -> list[Task]:
-    keys = [child_key(video_id, stage, scene.id) for scene in scenes]
+def children(
+    db: Session, video_id: UUID, stage: str, scenes: list[Scene], scope_id: UUID | None = None
+) -> list[Task]:
+    keys = [child_key(scope_id or video_id, stage, scene.id) for scene in scenes]
     return list(
         db.exec(select(Task).where(Task.video_id == video_id, Task.idempotency_key.in_(keys))).all()
     )
@@ -48,9 +50,11 @@ def completed(tasks: list[Task], count: int) -> bool:
     return len(tasks) == count and all(task.status == TaskStatus.SUCCEEDED for task in tasks)
 
 
-def result_asset(db: Session, task: Task, expected: AssetType) -> Asset:
+def result_asset(
+    db: Session, task: Task, expected: AssetType, *, identifier: str | None = None
+) -> Asset:
     data = task.result or {}
-    identifier = data.get("asset_id") or data.get("id")
+    identifier = identifier or data.get("asset_id") or data.get("id")
     asset = db.get(Asset, UUID(identifier)) if identifier else None
     if (
         asset is None
@@ -70,6 +74,10 @@ def advance_production(db: Session, task: Task) -> None:
     ):
         return
     video = owned_video(db, task.owner_id, task.video_id, lock=True)
+    from app.modules.revisions.service import revision_parameters
+
+    revision_id = task.parameters.get("revision_id")
+    scope_id = UUID(revision_id) if revision_id else video.id
     scenes = list(
         db.exec(
             select(Scene)
@@ -96,11 +104,11 @@ def advance_production(db: Session, task: Task) -> None:
                 TaskKind(scene.visual_type.value),
                 video_id=video.id,
                 scene_id=scene.id,
-                parameters={"pipeline": True},
-                key=child_key(video.id, "visual", scene.id),
+                parameters=revision_parameters(db, task, scene, TaskKind(scene.visual_type.value)),
+                key=child_key(scope_id, "visual", scene.id),
                 commit=False,
             )
-    visuals = children(db, video.id, "visual", scenes)
+    visuals = children(db, video.id, "visual", scenes, scope_id)
     if video.status == VideoStatus.GENERATING_ASSETS and completed(visuals, len(scenes)):
         for child in visuals:
             scene = next(s for s in scenes if s.id == child.scene_id)
@@ -118,11 +126,11 @@ def advance_production(db: Session, task: Task) -> None:
                 TaskKind.AUDIO,
                 video_id=video.id,
                 scene_id=scene.id,
-                parameters={"pipeline": True},
-                key=child_key(video.id, "audio", scene.id),
+                parameters=revision_parameters(db, task, scene, TaskKind.AUDIO),
+                key=child_key(scope_id, "audio", scene.id),
                 commit=False,
             )
-    audio = children(db, video.id, "audio", scenes)
+    audio = children(db, video.id, "audio", scenes, scope_id)
     if video.status == VideoStatus.GENERATING_AUDIO and completed(audio, len(scenes)):
         if not completed(visuals, len(scenes)):
             raise ValueError("Production visual jobs changed")
@@ -155,7 +163,8 @@ def advance_production(db: Session, task: Task) -> None:
             task.owner_id,
             TaskKind.RENDER,
             video_id=video.id,
-            parameters={"input_manifest": manifest.model_dump(mode="json")},
-            key=f"pipeline:{video.id}:render",
+            parameters={"input_manifest": manifest.model_dump(mode="json")}
+            | ({"revision_id": revision_id} if revision_id else {}),
+            key=f"pipeline:{scope_id}:render",
             commit=False,
         )

@@ -245,9 +245,10 @@ Nie korzysta z bazy skonfigurowanej w `.env`.
 
 ## TODO po etapie 20
 
-- Rozszerzona edycja gotowych filmów z wersjonowaniem assetów i ręczne odzyskiwanie niepewnych zadań.
 - Integracja z zewnętrznym systemem telemetrii (np. Sentry/Prometheus), jeśli będzie potrzebna.
-Automatyczny pipeline oraz seed/demo zostały dodane — instrukcja na końcu README.
+
+Automatyczny pipeline, seed/demo, wersje filmów i ręczne odzyskiwanie zadań zostały
+dodane — instrukcje na końcu README.
 Worker, dispatcher i scheduler są uruchamiane w Compose. Workflow prowadzi przez
 Directora, wizualia, narrację, render i kontrolę jakości do READY.
 W trybie `live` działający scheduler może zlecać płatne generowanie dla aktywnych
@@ -1796,7 +1797,7 @@ Aktualizacja: `docker compose up -d --build` wykona migrację `0017`.
 Nie dodano zewnętrznego monitoringu ani zależności telemetrycznych. Punkty
 rozszerzeń to middleware HTTP, kontekst logów, opakowanie providera i zdarzenia
 workera. Etap 20 zamyka numerowaną listę etapów; pozostałe prace produktowe
-(np. wersjonowana edycja gotowych filmów) są wymienione w TODO.
+są opisane w kolejnych sekcjach; opcjonalna telemetria pozostaje w TODO.
 
 ## Automatyczny pipeline i seed/demo
 
@@ -1825,7 +1826,7 @@ z konkretnymi identyfikatorami assetów z tego pipeline’u.
 Błąd lub `needs_review` zatrzymuje przejście do kolejnego etapu; pozostałe
 uruchomione sceny mogą się dokończyć. Film zachowuje ostatni etap, a szczegóły
 blokady są w zadaniach. Niepewne operacje nie są automatycznie ponawiane;
-rozszerzone ręczne odzyskiwanie pozostaje TODO. Obowiązują dotychczasowe limity budżetu.
+ręczne odzyskiwanie opisano poniżej. Obowiązują dotychczasowe limity budżetu.
 
 ### Demo bez płatnych providerów
 
@@ -1859,3 +1860,83 @@ Mock tworzy techniczne obrazy/klipy, cichą ścieżkę WAV, napisy i prawdziwy M
 TOP5 w tym demo korzysta wyłącznie z jawnych syntetycznych źródeł `demo.invalid`,
 oznaczonych jako DEMO — to nie są fakty historyczne. Zwykły research nadal wymaga
 własnego korpusu źródeł. CLI i testowy provider researchu odrzucają tryb `live`.
+
+## Wersje gotowych filmów i odzyskiwanie zadań
+
+Migracja `0018` dodaje modele SQLModel `VideoRevision` i `TaskRecovery`.
+Aktualizacja: `docker compose up -d --build` lub `uv run alembic upgrade head`.
+Wszystkie poniższe endpointy wymagają JWT właściciela filmu/zadania.
+
+### Szkic → edycja → nowy MP4
+
+`POST /api/v1/videos/{video_id}/revisions` tworzy szkic na podstawie filmu `READY`
+z zakończoną kontrolą jakości. Pierwsze wywołanie zachowuje wersję 1 i tworzy
+szkic wersji 2. Powtórne wywołanie zwraca istniejący szkic. Lista wersji:
+`GET /api/v1/videos/{video_id}/revisions`.
+
+```sh
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/v1/videos/$VIDEO_ID/revisions"
+
+curl -X PATCH -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  "http://localhost:8000/api/v1/videos/$VIDEO_ID/revisions/$REVISION_ID/scenes/$SCENE_ID" \
+  -d '{"visual_prompt":"A dark forest at dawn","camera_motion":"zoom_in"}'
+
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8000/api/v1/videos/$VIDEO_ID/revisions/$REVISION_ID/produce"
+```
+
+Szkic pozwala zmienić `narration`, `visual_prompt` i `camera_motion`.
+Narracja TOP5 jest chroniona, aby zachować powiązania z faktami.
+Liczba, kolejność i długości scen pozostają takie same; nowa narracja musi zmieścić
+się w czasie sceny, co sprawdza render/QC. Dane szkicu nie zmieniają aktualnych scen
+aż do `produce`. Wersji zatwierdzonej do produkcji nie można dalej edytować.
+
+Zmiana narracji generuje nowe audio; zmiana promptu generuje nowe
+wizualium. Pozostałe assety są wskazywane przez ich dotychczasowe ID. Render i
+napisy powstają jako nowe pliki. Poprzednie snapshoty scen i pliki nie są nadpisywane.
+`final_asset_id` w wersji `ready` wskazuje MP4 do pobrania przez
+`GET /api/v1/assets/{asset_id}/download`. Podczas produkcji dostępny pozostaje
+poprzedni MP4. Wspólny budżet filmu nie jest resetowany; ponowne użycie assetów
+nie zleca płatnej generacji. QC ma osobny limit napraw dla każdej nowej wersji.
+
+Stan wersji: `draft`, `producing`, `ready`, `cancelled`. W razie błędu produkcji
+wersja pozostaje `producing`; szczegóły i zadania widać w
+`GET /api/v1/videos/{video_id}/status`. Powtórne `produce` nie dubluje pracy.
+`POST /api/v1/videos/{video_id}/revisions/{revision_id}/cancel` anuluje szkic lub
+zatrzymaną produkcję i przywraca sceny/status poprzedniej gotowej wersji.
+Wymaga zakończenia aktywnych zadań oraz rozstrzygnięcia `needs_review`.
+Koszty, zadania i utworzone pliki pozostają w historii. Gotowej wersji nie można anulować.
+
+### Ręczne odzyskiwanie
+
+`POST /api/v1/tasks/{task_id}/recover` przyjmuje `action` i wymagane `note`.
+Obsługuje zadania filmu w stanie `failed` lub `needs_review`, bez innych aktywnych
+zadań filmu. Historia decyzji jest dostępna przez
+`GET /api/v1/tasks/{task_id}/recoveries` i zawiera autora, datę, uzasadnienie
+oraz identyfikatory użyte do odzyskania wyniku.
+
+| Akcja | Działanie |
+| --- | --- |
+| `resume` | Odczyt zapisanego skryptu/researchu, wznowienie lokalnego Directora, renderu z manifestu, QC lub odpytywania znanego zadania Runpod. |
+| `use_asset` | Przyjęcie ręcznie zweryfikowanego istniejącego `asset_id` o zgodnym filmie, scenie i typie; bez nowej generacji. |
+| `abandon` | Zakończenie śledzenia zadania jako `failed`; blokuje dalsze retry tego zadania i zachowuje rezerwacje kosztów. |
+
+```sh
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  "http://localhost:8000/api/v1/tasks/$TASK_ID/recover" \
+  -d '{"action":"resume","note":"Zweryfikowano zapisany wynik"}'
+```
+
+Jeżeli odpowiedź Runpod z ID zaginęła po wysłaniu zlecenia, `resume` może zawierać
+`provider_job_id` znalezione w panelu providera. Backend używa skonfigurowanego
+endpointu odpowiadającego typowi zadania; nie przyjmuje dowolnego URL ani endpointu.
+Zapisanej referencji nie można zastąpić. Worker tylko odpytuje istniejące zlecenie,
+a plik musi być w przewidzianym dla zadania miejscu storage.
+
+Nieznanego wyniku TTS nie wysyłamy ponownie: można przypiąć zweryfikowany asset
+lub porzucić zadanie. `abandon` nie anuluje zlecenia u providera i nie oznacza,
+że usługa go nie rozliczyła. Koszty pozostają naliczone/rezerwowane także po
+anulowaniu wersji. Odzyskiwanie ma limit 3 prób i dotychczasowy limit 10 wykonań;
+porzucenie jest dostępne również po wyczerpaniu limitu. Zadania poprzedniej lub
+anulowanej wersji nie mogą zmienić aktualnie produkowanego filmu.

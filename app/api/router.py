@@ -9,6 +9,7 @@ from app.api.routes.panel import router as panel_router
 from app.api.routes.quality import router as quality_router
 from app.api.routes.render import router as render_router
 from app.api.routes.research import router as research_router
+from app.api.routes.revisions import router as revisions_router
 from app.api.routes.scripts import router as scripts_router
 from app.api.routes.tasks import router as tasks_router
 
@@ -32,3 +33,4 @@ router.include_router(render_router)
 router.include_router(quality_router)
 router.include_router(panel_router)
 router.include_router(admin_router)
+router.include_router(revisions_router)

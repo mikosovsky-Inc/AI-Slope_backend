@@ -37,6 +37,22 @@ class ReviewRequired(Exception):
 
 
 def execute_operation(db: Session, task: Task, settings: Settings) -> dict:
+    from app.modules.revisions.service import check_revision_task
+
+    check_revision_task(db, task)
+    if task.checkpoint.get("recovery_result") is not None:
+        return task.checkpoint["recovery_result"]
+    if task.parameters.get("reuse_asset_id"):
+        from app.modules.assets.models import AssetType
+        from app.modules.production.service import result_asset
+
+        # Reused media remains scoped to the same owned video and scene.
+        owned_video(db, task.owner_id, task.video_id)
+        asset = result_asset(
+            db, task, AssetType(task.kind.value), identifier=task.parameters["reuse_asset_id"]
+        )
+        return {"asset_id": str(asset.id), "reused": True}
+
     def managed(stack, factory):
         provider = factory(settings)
         stack.callback(provider.close)
@@ -112,7 +128,12 @@ def execute_operation(db: Session, task: Task, settings: Settings) -> dict:
                 settings,
                 regeneration_id=UUID(task.parameters["quality_check_id"])
                 if task.parameters.get("quality_check_id")
-                else (task.id if task.parameters.get("panel_regeneration") else None),
+                else (
+                    task.id
+                    if task.parameters.get("panel_regeneration")
+                    or task.parameters.get("revision_id")
+                    else None
+                ),
             )
         elif kind == TaskKind.QUALITY:
             from app.modules.quality.provider import create_visual_quality_provider
@@ -218,9 +239,14 @@ def visual(db: Session, task: Task, provider, settings: Settings) -> dict:
 
 def recover_result(db: Session, task: Task) -> dict | None:
     """Recover committed domain results without repeating an uncertain external call."""
+    from app.modules.revisions.service import check_revision_task
     from app.modules.scripts.service import get_script
     from app.modules.videos.models import Video, VideoStatus
 
+    check_revision_task(db, task)
+
+    if task.checkpoint.get("recovery_result") is not None:
+        return task.checkpoint["recovery_result"]
     if task.kind in (TaskKind.STORY, TaskKind.TOP5):
         script = db.exec(select(VideoScript).where(VideoScript.video_id == task.video_id)).first()
         if script:

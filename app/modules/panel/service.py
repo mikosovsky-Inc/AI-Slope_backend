@@ -313,6 +313,14 @@ def retry(db: Session, owner_id: UUID, video_id: UUID, task_id: UUID) -> TaskRea
         raise HTTPException(
             409, "Only failed tasks can be retried; uncertain outcomes require review"
         )
+    if task.checkpoint.get("recovery_abandoned"):
+        raise HTTPException(409, "An abandoned task cannot be retried")
+    from app.modules.revisions.service import check_revision_task
+
+    try:
+        check_revision_task(db, task)
+    except ValueError:
+        raise HTTPException(409, "Task belongs to an earlier or cancelled version") from None
     count = task.checkpoint.get("panel_retries", 0)
     if count >= 3 or task.attempts >= 10:
         raise HTTPException(409, "Manual retry limit reached")

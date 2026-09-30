@@ -142,6 +142,9 @@ def _run_task(engine, task_id: str, *, settings=None) -> None:
                 from app.modules.production.service import advance_production
 
                 advance_production(db, task)
+                from app.modules.revisions.service import finish_revision
+
+                finish_revision(db, task)
                 # Complete parent and enqueue child atomically; no broker send in this transaction.
                 next_kind = {
                     TaskKind.RESEARCH: TaskKind.TOP5,
@@ -194,7 +197,12 @@ def _run_task(engine, task_id: str, *, settings=None) -> None:
                     task.status = TaskStatus.QUEUED
                     task.available_at = datetime.now(UTC) + timedelta(seconds=2**task.attempts)
                 elif isinstance(exc, PollLater):
-                    if datetime.now(UTC) - task.started_at.replace(tzinfo=UTC) > timedelta(
+                    poll_start = (
+                        datetime.fromisoformat(task.checkpoint["recovery_poll_started_at"])
+                        if task.checkpoint.get("recovery_poll_started_at")
+                        else task.started_at.replace(tzinfo=UTC)
+                    )
+                    if datetime.now(UTC) - poll_start > timedelta(
                         milliseconds=settings.runpod_job_ttl_ms
                     ):
                         task.status, task.error = TaskStatus.NEEDS_REVIEW, "provider_poll_deadline"

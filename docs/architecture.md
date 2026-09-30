@@ -922,3 +922,51 @@ Redis/Dramatiq, SeaweedFS i FFmpeg. Dwa filmy doszły do READY (STORY: 14 zadań
 TOP5: 17), każdy z jednym renderem. Pobranie przez chroniony endpoint i ffprobe
 potwierdziły H.264/AAC, 1080×1920 oraz około 20 sekund. Mock obejmował wyłącznie
 zewnętrznych providerów AI; media były rzeczywistymi plikami.
+
+## Wersjonowanie i ręczne odzyskiwanie
+
+Migracja 0018 dodaje SQLModel VideoRevision oraz TaskRecovery. Wersja przechowuje
+numer w obrębie filmu, snapshot scen, bazowy render oraz identyfikatory gotowego
+renderu/MP4. Pierwszy szkic zachowuje istniejący film jako wersję 1. Szkic zmienia
+wyłącznie JSON walidowany przez Pydantic; endpoint produce przenosi zatwierdzone
+wartości do scen roboczych i atomowo tworzy zadanie Directora. Poprzednie sceny są
+zachowane w snapshotach, a assety i manifesty renderowania pozostają dostępne.
+
+Pipeline używa identyfikatora wersji w kluczach zadań. Niezmienione media są
+ponownie używane przez dokładne ID z bazowego manifestu, bez providerów i bez
+nowych kosztów. Zmiana narracji generuje nowe audio z własnym kluczem regeneracji;
+zmiana promptu generuje nowe wizualium. Nowy render tworzy osobne napisy i MP4.
+QC przekazuje revision_id również do napraw i kolejnego renderu; limit napraw
+liczony jest od nowa dla wersji, a globalny numer QualityCheck pozostaje historią.
+Worker oznacza wersję ready w transakcji zakończenia udanego QC.
+
+Blokada właściciela serializuje tworzenie/edycję/produkowanie/anulowanie wersji.
+Powtórne create zwraca istniejący szkic, a produce nie tworzy drugiego pipeline’u.
+Nie ma edycji zatwierdzonej wersji. Kontrola wersji przed wykonaniem zadania
+blokuje zlecenia wcześniejszej lub anulowanej produkcji. Anulowanie wymaga braku
+aktywnych i niepewnych zadań; przywraca bazowe sceny i READY ze zdarzeniem w historii,
+bez usuwania plików, kosztów i zakończonych zadań. Budżet jest wspólny dla filmu.
+
+Recovery obsługuje failed/needs_review należące do właściciela filmu. Resume używa
+zapisanego wyniku, znanego Runpod job ID, lokalnego Directora, renderu z manifestem
+lub QC. Dla utraconego ID Runpod można podać ID ze zweryfikowanego zlecenia,
+bez podawania URL/endpointu. Use_asset wymaga istniejącego assetu zgodnego z filmem,
+sceną i typem. Wynik recovery zapisuje się w checkpointcie przed ponownym
+zakolejkowaniem, więc przeżywa restart także między przejęciem a wykonaniem zadania.
+Resume nie wysyła ponownie niepewnej generacji. Abandon trwale blokuje retry danego
+zadania, zachowując rezerwację kosztu; nie deklaruje anulowania u providera.
+Każda decyzja ma autora, notatkę, numer, datę i referencje dowodów w TaskRecovery.
+
+Weryfikacja: regresja 329 testów jednostkowych/storage, 40 wcześniejszych testów
+integracyjnych oraz 2 nowe testy PostgreSQL; dodatkowe i końcowe testy recovery
+oraz wersji objęły łącznie 375 różnych przypadków. PostgreSQL potwierdził migrację
+zgodną z metadanymi i downgrade, współbieżne create/produce/recover oraz rollback
+scen, statusu i szkicu przy błędzie outbox (HTTP 503). Testy mediów potwierdzają
+READY nowej wersji, niezmienność starego MP4, ponowne użycie ośmiu assetów,
+izolację właścicieli, ochronę narracji TOP5, anulowanie i wznowienie bez nowego
+wywołania providera. Ruff i formatowanie przeszły dla 263 plików.
+
+Osobny Compose z PostgreSQL, Redis, workerami i SeaweedFS wygenerował oba filmy
+demo, a następnie wersję 2 STORY po zmianie narracji i promptu. Przez HTTP
+potwierdzono ready, nowy MP4 (154600 bajtów), tę samą sumę SHA-256 starego filmu,
+osiem ponownie użytych assetów oraz brak duplikacji po drugim produce.

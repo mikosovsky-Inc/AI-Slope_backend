@@ -32,7 +32,15 @@ def enqueue_quality(db: Session, owner_id: UUID, render: Task, *, commit: bool =
         owner_id,
         TaskKind.QUALITY,
         video_id=render.video_id,
-        parameters={"render_task_id": str(render.id)},
+        parameters={"render_task_id": str(render.id)}
+        | (
+            {
+                "revision_id": render.parameters["revision_id"],
+                "revision_attempt": render.parameters.get("revision_attempt", 1),
+            }
+            if render.parameters.get("revision_id")
+            else {}
+        ),
         key=f"quality:{render.id}",
         commit=commit,
     )
@@ -152,7 +160,7 @@ class QualityService:
             )
         elif (
             all(f.scene_id is not None and f.repair is not None for f in failures)
-            and check.attempt <= policy.max_scene_retries
+            and task.parameters.get("revision_attempt", check.attempt) <= policy.max_scene_retries
         ):
             repairs = sorted({(str(f.scene_id), f.repair) for f in failures})
             children = []
@@ -237,7 +245,15 @@ class QualityService:
                     task.owner_id,
                     TaskKind.RENDER,
                     video_id=check.video_id,
-                    parameters={"input_manifest": manifest.model_dump(mode="json")},
+                    parameters={"input_manifest": manifest.model_dump(mode="json")}
+                    | (
+                        {
+                            "revision_id": task.parameters["revision_id"],
+                            "revision_attempt": task.parameters.get("revision_attempt", 1) + 1,
+                        }
+                        if task.parameters.get("revision_id")
+                        else {}
+                    ),
                     key=f"quality-rerender:{check.id}",
                     commit=False,
                 )
