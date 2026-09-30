@@ -110,6 +110,14 @@ class RequestLoggingMiddleware:
                 raise
             finally:
                 route = scope.get("route")
+                metrics = getattr(getattr(scope.get("app"), "state", None), "http_metrics", None)
+                if metrics is not None and scope.get("path") != "/metrics":
+                    metrics.observe(
+                        scope["method"],
+                        getattr(route, "path", "unmatched"),
+                        status,
+                        perf_counter() - start,
+                    )
                 logging.getLogger("app.http").info(
                     "HTTP request completed",
                     extra={

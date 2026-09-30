@@ -1,0 +1,38 @@
+groups:
+  - name: ai-slop
+    rules:
+      - alert: AISlopMetricsUnavailable
+        expr: up{job="ai-slop"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: API metrics cannot be scraped
+      - alert: AISlopQueueStalled
+        expr: ai_slop_task_overdue_seconds{status="queued"} > 300
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Scheduled tasks are not being processed
+      - alert: AISlopWorkerLeaseExpired
+        expr: ai_slop_task_overdue_seconds{status="running"} > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Running tasks have expired leases
+      - alert: AISlopTaskNeedsReview
+        expr: sum(ai_slop_tasks{status="needs_review"}) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Tasks require an owner recovery decision
+      - alert: AISlopHTTPErrorRate
+        expr: sum(rate(ai_slop_http_requests_total{status=~"5.."}[5m])) / sum(rate(ai_slop_http_requests_total[5m])) > 0.05 and sum(rate(ai_slop_http_requests_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: More than five percent of API requests fail

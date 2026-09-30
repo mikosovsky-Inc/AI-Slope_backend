@@ -22,6 +22,21 @@ class Settings(BaseSettings):
     redis_url: RedisDsn = "redis://localhost:6379/0"
     redis_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    metrics_enabled: bool = False
+    metrics_token: SecretStr | None = None
+
+    @model_validator(mode="after")
+    def validate_metrics(self):
+        if self.metrics_enabled:
+            import re
+
+            token = self.metrics_token.get_secret_value() if self.metrics_token else ""
+            if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", token):
+                raise ValueError(
+                    "Enabled metrics require a 32-256 character URL-safe METRICS_TOKEN"
+                )
+        return self
+
     ffmpeg_binary: str = "ffmpeg"
     ffprobe_binary: str = "ffprobe"
     render_timeout_seconds: int = Field(default=600, ge=10, le=1800)

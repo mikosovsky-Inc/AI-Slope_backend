@@ -1,0 +1,62 @@
+rule_files:
+  - /etc/prometheus/alerts.yml
+evaluation_interval: 1m
+tests:
+  - interval: 1m
+    input_series:
+      - series: 'up{job="ai-slop"}'
+        values: '1+0x10'
+      - series: 'ai_slop_task_overdue_seconds{kind="render",queue="render",status="queued"}'
+        values: '0+0x10'
+      - series: 'ai_slop_tasks{status="needs_review"}'
+        values: '0+0x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AISlopMetricsUnavailable
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: AISlopQueueStalled
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: AISlopTaskNeedsReview
+        exp_alerts: []
+  - interval: 1m
+    input_series:
+      - series: 'up{job="ai-slop"}'
+        values: '0+0x10'
+      - series: 'ai_slop_task_overdue_seconds{kind="render",queue="render",status="queued"}'
+        values: '301+0x10'
+      - series: 'ai_slop_task_overdue_seconds{kind="audio",queue="audio",status="running"}'
+        values: '61+0x10'
+      - series: 'ai_slop_tasks{status="needs_review"}'
+        values: '1+0x10'
+      - series: 'ai_slop_http_requests_total{status="200"}'
+        values: '0+60x10'
+      - series: 'ai_slop_http_requests_total{status="500"}'
+        values: '0+6x10'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AISlopMetricsUnavailable
+        exp_alerts:
+          - exp_labels: {job: ai-slop, severity: critical}
+            exp_annotations: {summary: API metrics cannot be scraped}
+      - eval_time: 10m
+        alertname: AISlopQueueStalled
+        exp_alerts:
+          - exp_labels: {kind: render, queue: render, status: queued, severity: warning}
+            exp_annotations: {summary: Scheduled tasks are not being processed}
+      - eval_time: 10m
+        alertname: AISlopWorkerLeaseExpired
+        exp_alerts:
+          - exp_labels: {kind: audio, queue: audio, status: running, severity: warning}
+            exp_annotations: {summary: Running tasks have expired leases}
+      - eval_time: 10m
+        alertname: AISlopTaskNeedsReview
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations: {summary: Tasks require an owner recovery decision}
+      - eval_time: 10m
+        alertname: AISlopHTTPErrorRate
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations: {summary: More than five percent of API requests fail}

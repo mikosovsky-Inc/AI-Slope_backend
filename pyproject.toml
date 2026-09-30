@@ -20,6 +20,7 @@ dependencies = [
     "openai>=2,<3",
     "boto3>=1.40,<2",
     "dramatiq[redis]>=2.2,<3",
+    "prometheus-client>=0.22,<1",
 ]
 
 [dependency-groups]

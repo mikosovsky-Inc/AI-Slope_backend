@@ -243,12 +243,10 @@ Test używa oddzielnych originów i izolowanej bazy SQLite w pamięci.
 Nie korzysta z bazy skonfigurowanej w `.env`.
 
 
-## TODO po etapie 20
+## Status prac po etapie 20
 
-- Integracja z zewnętrznym systemem telemetrii (np. Sentry/Prometheus), jeśli będzie potrzebna.
-
-Automatyczny pipeline, seed/demo, wersje filmów i ręczne odzyskiwanie zadań zostały
-dodane — instrukcje na końcu README.
+Automatyczny pipeline, seed/demo, wersje filmów, ręczne odzyskiwanie zadań oraz
+opcjonalna telemetria Prometheus zostały dodane — instrukcje na końcu README.
 Worker, dispatcher i scheduler są uruchamiane w Compose. Workflow prowadzi przez
 Directora, wizualia, narrację, render i kontrolę jakości do READY.
 W trybie `live` działający scheduler może zlecać płatne generowanie dla aktywnych
@@ -1797,7 +1795,7 @@ Aktualizacja: `docker compose up -d --build` wykona migrację `0017`.
 Nie dodano zewnętrznego monitoringu ani zależności telemetrycznych. Punkty
 rozszerzeń to middleware HTTP, kontekst logów, opakowanie providera i zdarzenia
 workera. Etap 20 zamyka numerowaną listę etapów; pozostałe prace produktowe
-są opisane w kolejnych sekcjach; opcjonalna telemetria pozostaje w TODO.
+są opisane w kolejnych sekcjach, w tym opcjonalna telemetria Prometheus.
 
 ## Automatyczny pipeline i seed/demo
 
@@ -1940,3 +1938,101 @@ lub porzucić zadanie. `abandon` nie anuluje zlecenia u providera i nie oznacza,
 anulowaniu wersji. Odzyskiwanie ma limit 3 prób i dotychczasowy limit 10 wykonań;
 porzucenie jest dostępne również po wyczerpaniu limitu. Zadania poprzedniej lub
 anulowanej wersji nie mogą zmienić aktualnie produkowanego filmu.
+
+## Telemetria Prometheus
+
+Telemetria jest opcjonalna i domyślnie wyłączona. Nie wymaga migracji bazy ani
+konta w zewnętrznej usłudze. Konfiguracja i token pochodzą z `.env` przez
+pydantic-settings; token jest `SecretStr` i nie trafia do logów.
+
+### Uruchomienie
+
+Wygeneruj osobny token (nie używaj klucza JWT):
+
+```sh
+python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
+```
+
+W `.env` ustaw:
+
+```dotenv
+METRICS_ENABLED=true
+METRICS_TOKEN=<wygenerowany_token>
+PROMETHEUS_PORT=9090
+```
+
+Następnie w folderze backendu:
+
+```sh
+docker compose --profile monitoring up -d --build
+```
+
+Prometheus będzie dostępny pod `http://localhost:9090`; target `ai-slop` powinien
+mieć status UP. Kontener `monitoring-init` przekazuje token przez dedykowany wolumen
+odczytywany przez Prometheusa; sekret nie jest zapisany w repozytoryjnym YAML.
+Profil wymaga włączonych metryk i tokenu o długości 32–256 znaków URL-safe.
+Port Prometheusa jest wystawiony wyłącznie na 127.0.0.1. Historia ma osobny wolumen
+`prometheus_data` i retencję 15 dni / 1 GB (decyduje wcześniejszy limit).
+
+API eksportuje `GET /metrics`, wymagający `Authorization: Bearer <METRICS_TOKEN>`.
+Token daje wyłącznie dostęp do metryk; nie zastępuje JWT na endpointach aplikacji.
+Bez tokenu lub przy błędnym tokenie odpowiedź to 401; przy wyłączonych metrykach — 404.
+Awaria bazy zwraca 503, aby Prometheus odnotował nieudane pobranie zamiast fałszywych zer.
+
+Po zmianie tokenu odtwórz konfigurację klienta i API:
+
+```sh
+docker compose --profile monitoring up -d --force-recreate api monitoring-init prometheus
+```
+
+Wyłączenie: ustaw `METRICS_ENABLED=false`, odtwórz API przez `docker compose up -d api`
+i zatrzymaj monitor przez `docker compose --profile monitoring stop prometheus`.
+
+### Dostępne metryki
+
+| Metryka | Znaczenie |
+| --- | --- |
+| `ai_slop_http_requests_total` | Licznik zakończonych żądań według metody, szablonu ścieżki i statusu HTTP. |
+| `ai_slop_http_request_duration_seconds` | Histogram czasu odpowiedzi API w sekundach. |
+| `ai_slop_tasks` | Bieżące liczby zapisanych zadań według rodzaju, kolejki i stanu. |
+| `ai_slop_task_overdue_seconds` | Opóźnienie najstarszego zadania względem `available_at`; dla RUNNING czas po wygaśnięciu dzierżawy. |
+| `ai_slop_task_errors` | Zapisane zadania FAILED/NEEDS_REVIEW według rodzaju i ograniczonej listy kategorii błędów. |
+| `ai_slop_videos` | Liczby filmów według stanu. |
+
+Metryki zadań i filmów są **gauge**, odczytywane z PostgreSQL. Obejmują wszystkie
+procesy workerów oraz zachowaną historię; nie są licznikami zdarzeń. Zmieniają się
+także po odzyskaniu lub usunięciu zadania. Opóźnienie jest zerowe dla pustej kolejki
+i zadań zaplanowanych w przyszłości. Te metryki wykrywają zaległą pracę, nie są
+bezpośrednim heartbeat każdego workera.
+
+Liczniki HTTP są lokalne dla procesu API i resetują się po jego restarcie.
+Konfiguracja Compose używa jednego procesu API. Przy wielu instancjach należy
+zbierać każdą osobno; wspólnych gauge z bazy nie należy sumować między replikami
+(stosuj np. `max`). Kilka procesów Uvicorna za jednym adresem wymaga osobnego
+rozwiązania do agregacji metryk HTTP.
+
+Etykiety nie zawierają ID użytkowników, kanałów, filmów ani zadań. Nie eksportujemy
+URL-i z parametrami, promptów, notatek odzyskiwania ani odpowiedzi providerów.
+Nierozpoznane ścieżki są grupowane jako `unmatched`, nietypowe metody jako `OTHER`,
+a nieznane kategorie błędów jako `other`. Sam `/metrics` nie zwiększa liczników HTTP.
+
+### Zapytania i alerty
+
+Przykładowe PromQL w interfejsie Prometheusa:
+
+```promql
+sum(rate(ai_slop_http_requests_total[5m]))
+histogram_quantile(0.95, sum by (le) (rate(ai_slop_http_request_duration_seconds_bucket[5m])))
+sum by (queue, status) (ai_slop_tasks)
+max by (queue) (ai_slop_task_overdue_seconds{status="queued"})
+```
+
+Plik `monitoring/alerts.yml` zawiera pięć reguł: niedostępność metryk, zaległą
+kolejkę, wygasłe dzierżawy workerów, zadania wymagające decyzji oraz wysoki udział
+odpowiedzi 5xx. Ich stan widać w Prometheusie. Nie skonfigurowano wysyłania wiadomości
+ani zewnętrznego Alertmanagera. Testy reguł w `monitoring/alerts.test.yml` są uruchamiane
+przez GitHub Actions przy push/PR wraz z dotychczasowymi testami backendu.
+
+Format autoryzacji i pobierania metryk opisuje
+[dokumentacja konfiguracji Prometheusa](https://prometheus.io/docs/prometheus/latest/configuration/configuration/),
+a pomiar czasu — [dokumentacja histogramów klienta Python](https://prometheus.github.io/client_python/instrumenting/histogram/).

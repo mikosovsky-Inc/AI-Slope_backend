@@ -970,3 +970,50 @@ Osobny Compose z PostgreSQL, Redis, workerami i SeaweedFS wygenerował oba filmy
 demo, a następnie wersję 2 STORY po zmianie narracji i promptu. Przez HTTP
 potwierdzono ready, nowy MP4 (154600 bajtów), tę samą sumę SHA-256 starego filmu,
 osiem ponownie użytych assetów oraz brak duplikacji po drugim produce.
+
+## Telemetria Prometheus
+
+Opcjonalny profil Compose `monitoring` uruchamia Prometheusa i jednorazowy
+initializer jego poświadczenia. METRICS_ENABLED oraz METRICS_TOKEN są walidowane
+przez pydantic-settings; token to SecretStr, niezależny od JWT. Initializer zapisuje
+go w dedykowanym wolumenie, podmontowanym tylko do odczytu w Prometheusie.
+Konfiguracja repozytorium zawiera ścieżkę credentials_file, nie wartość sekretu.
+Serwer Prometheus jest dostępny tylko na loopback, z trwałą retencją 15 dni / 1 GB.
+
+GET /metrics nie wymaga sesji użytkownika: używa osobnego tokenu Bearer porównywanego
+constant-time. Przy wyłączeniu telemetrii zwraca 404, błędnym tokenie 401, awarii
+PostgreSQL 503. Endpoint nie eksportuje częściowego wyniku z fałszywymi zerami.
+Nie jest uwzględniany we własnych licznikach HTTP. Nie dodano migracji.
+
+Licznik HTTP i histogram czasu odpowiedzi są osobne dla instancji API i tworzone
+w lifespan. RequestLoggingMiddleware rejestruje także nieobsłużone 500. Etykiety
+używają szablonów routingu, ograniczonego zbioru metod i statusów. Dowolne ścieżki
+404 oraz metody są agregowane do unmatched/OTHER. Nie zapisujemy parametrów URL,
+promptów, ID domenowych, odpowiedzi providerów ani danych uwierzytelnienia.
+
+Gauge zadań, opóźnień, kategorii błędów i stanów filmów są wyliczane przy scrape
+przez cztery agregujące zapytania SQL. Obejmują wszystkie procesy workerów, restart
+i zachowaną historię. Nie wymagają Pushgateway ani współdzielonej pamięci procesów.
+Opóźnienie używa available_at, więc odroczone polling/retry nie są zaległością
+przed swoim terminem, a RUNNING pokazuje czas po wygaśnięciu dzierżawy. Nie jest
+to heartbeat nieobciążonego workera. Nieznane kategorie błędów trafiają do other.
+Przy replikacji API gauge wspólnej bazy należy agregować przez max, nie sum;
+liczniki HTTP wymagają scrape każdej instancji. Domyślny Compose ma jeden proces API.
+
+Pięć reguł alertów obejmuje niedostępność scrape, zaległą kolejkę, wygasłe dzierżawy,
+needs_review i udział 5xx. Reguły są oceniane w Prometheusie; nie skonfigurowano
+Alertmanagera ani wysyłania wiadomości. Testy promtool sprawdzają stany zdrowe
+i awarie; dodano ich uruchamianie do istniejącego workflow push/PR.
+
+Testy API obejmują wyłączenie i autoryzację, walidację/ukrywanie sekretu,
+ograniczenie etykiet, trwały stan zadań, 503 przy awarii bazy oraz 500 w liczniku
+HTTP. Test PostgreSQL potwierdza agregację zadań zapisanych w innej sesji.
+Osobny stos Compose potwierdził target UP, widoczność zakończenia zadania przez
+rzeczywisty worker Redis/Dramatiq, pięć zdrowych reguł i brak prywatnych etykiet.
+Promtool check config oraz test rules zakończyły się powodzeniem.
+
+Końcowa regresja: 341 testów jednostkowych/storage, 43 integracyjne oraz dodatkowy
+test licznika 500 — łącznie 385 różnych przypadków. Dziewięć testów telemetrycznych
+przeszło również osobne uruchomienie. Ruff check, format --check (268 plików)
+i git diff --check zakończyły się bez błędów. Ostrzeżenia pozostają po stronie
+Starlette/AnyIO i konfiguracji Alembic.

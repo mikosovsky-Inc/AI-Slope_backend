@@ -81,3 +81,9 @@ jobs:
 
       - name: Run unit and integration tests
         run: uv run --no-sync pytest -ra
+
+      - name: Test Prometheus alert rules
+        run: >-
+          docker run --rm --entrypoint promtool
+          -v "$PWD/monitoring:/etc/prometheus:ro"
+          prom/prometheus:v3.13.3 test rules /etc/prometheus/alerts.test.yml

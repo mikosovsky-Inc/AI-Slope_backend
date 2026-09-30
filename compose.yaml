@@ -40,6 +40,8 @@ services:
       DATABASE_STATEMENT_TIMEOUT_MS: ${DATABASE_STATEMENT_TIMEOUT_MS:-5000}
       REDIS_TIMEOUT_SECONDS: ${REDIS_TIMEOUT_SECONDS:-2}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      METRICS_ENABLED: ${METRICS_ENABLED:-false}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
       EXTERNAL_PROVIDERS_MODE: ${EXTERNAL_PROVIDERS_MODE:-mock}
       ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
       ELEVENLABS_MODEL: ${ELEVENLABS_MODEL:-}
@@ -119,6 +121,33 @@ services:
     restart: unless-stopped
     stop_grace_period: 20s
 
+  monitoring-init:
+    profiles: [monitoring]
+    build: .
+    user: "0:0"
+    entrypoint: []
+    command: ["python", "-m", "app.modules.observability.configure_prometheus"]
+    environment: *backend_environment
+    volumes:
+      - prometheus_credentials:/credentials
+
+  prometheus:
+    profiles: [monitoring]
+    image: prom/prometheus:v3.13.3
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.path=/prometheus", "--storage.tsdb.retention.time=15d", "--storage.tsdb.retention.size=1GB"]
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus_credentials:/credentials:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      monitoring-init:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+
   postgres:
     image: postgres:17
     environment:
@@ -161,6 +190,8 @@ services:
       - seaweedfs_data:/data
 
 volumes:
+  prometheus_credentials:
+  prometheus_data:
   seaweedfs_data:
   postgres_data:
   redis_data:

@@ -8,6 +8,7 @@ from starlette.types import ASGIApp
 
 from app.api.router import router
 from app.api.routes.health import router as health_router
+from app.api.routes.metrics import router as metrics_router
 from app.core.config import get_settings
 from app.core.errors import register_error_handlers
 from app.core.logging import configure_logging
@@ -24,6 +25,9 @@ from app.integrations.storage.factory import create_storage_provider
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     configure_logging(settings.log_level)
+    from app.modules.observability.metrics import HTTPMetrics
+
+    app.state.http_metrics = HTTPMetrics() if settings.metrics_enabled else None
     logger = logging.getLogger("app.lifecycle")
     app.state.storage = create_storage_provider(settings)
     app.state.llm = create_llm_provider(settings)
@@ -46,6 +50,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="AI-Slop API", version="0.1.0", lifespan=lifespan)
 app.include_router(router)
 app.include_router(health_router)
+app.include_router(metrics_router)
 register_error_handlers(app)
 
 
